@@ -1,0 +1,21 @@
+# =============================================================================
+# Traefik Dynamic Configuration — Security Middleware Chain
+# =============================================================================
+# Loaded via file provider. Referenced by Docker labels as @file.
+# =============================================================================
+
+http:
+  middlewares:
+    security-headers:
+      headers:
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: true
+        customFrameOptionsValue: "SAMEORIGIN"
+        contentTypeNosniff: true
+        browserXssFilter: true
+        referrerPolicy: "strict-origin-when-cross-origin"
+    security-chain:
+      chain:
+        middlewares:
+          - security-headers

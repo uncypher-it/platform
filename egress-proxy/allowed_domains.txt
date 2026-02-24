@@ -1,0 +1,22 @@
+# =============================================================================
+# Allowed Egress Domains — Uncypher Self-Hosted
+# =============================================================================
+# Only these domains can be reached from inside the Uncypher stack.
+# Edit this file to match your organization's data residency policy.
+# Restart the egress-proxy after changes:
+#   docker compose restart egress-proxy
+# =============================================================================
+
+# OpenAI API (chat agent + codex)
+.openai.com
+.oaiusercontent.com
+
+# Anthropic API (Claude Code / Codex)
+.anthropic.com
+
+# GitHub (OAuth + repository cloning)
+.github.com
+.githubusercontent.com
+
+# Let's Encrypt (when TLS_MODE=letsencrypt)
+.letsencrypt.org

@@ -1,0 +1,480 @@
+# =============================================================================
+# Uncypher Self-Hosted Docker Compose
+# =============================================================================
+# All services use pre-built images — no source code or build step needed.
+# Configure via .env file (see .env.example).
+#
+# Start:  docker compose up -d
+# Stop:   docker compose down
+# Logs:   docker compose logs -f
+# =============================================================================
+
+services:
+  # ===========================================
+  # Traefik Reverse Proxy (Ingress)
+  # ===========================================
+  traefik:
+    image: traefik:v3.6
+    container_name: uncypher-traefik
+    command:
+      - "--api.insecure=false"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=uncypher-internal"
+      # Entrypoints
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
+      # Let's Encrypt (when TLS_MODE=letsencrypt)
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:-admin@localhost}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/certs/acme.json"
+      # Static certs file provider (when TLS_MODE=static)
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--providers.file.watch=true"
+      # Access logging
+      - "--accesslog=true"
+      - "--accesslog.filepath=/var/log/traefik/access.json"
+      - "--accesslog.format=json"
+      # Healthcheck
+      - "--ping=true"
+      - "--ping.entrypoint=web"
+    ports:
+      - "${TRAEFIK_HTTP_PORT:-80}:80"
+      - "${TRAEFIK_HTTPS_PORT:-443}:443"
+    environment:
+      DOCKER_API_VERSION: "1.44"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik_certs:/certs
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
+      - ./certs:/certs/static:ro
+      - traefik_logs:/var/log/traefik
+    labels:
+      - "traefik.enable=true"
+      # Middleware: IP allowlist (needs env vars, so defined via Docker labels)
+      - "traefik.http.middlewares.ip-allowlist.ipallowlist.sourcerange=${ALLOWED_IP_RANGES:-0.0.0.0/0}"
+      # Middleware: Rate limit
+      - "traefik.http.middlewares.rate-limit.ratelimit.average=${RATE_LIMIT_AVERAGE:-100}"
+      - "traefik.http.middlewares.rate-limit.ratelimit.burst=${RATE_LIMIT_BURST:-200}"
+      # Security headers + chain defined in traefik/dynamic/middlewares.yml (file provider)
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:80/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - uncypher-internal
+      - uncypher-egress
+
+  # ===========================================
+  # Squid Egress Proxy (Data Residency)
+  # ===========================================
+  egress-proxy:
+    image: ubuntu/squid:6.6-24.04_edge
+    container_name: uncypher-egress-proxy
+    volumes:
+      - ./egress-proxy/squid.conf:/etc/squid/squid.conf:ro
+      - ./egress-proxy/allowed_domains.txt:/etc/squid/allowed_domains.txt:ro
+      - egress_logs:/var/log/squid
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "squid -k check || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - uncypher-internal
+      - uncypher-egress
+
+  # ===========================================
+  # Shared Infrastructure
+  # ===========================================
+  postgres:
+    image: postgres:16
+    container_name: uncypher-postgres
+    environment:
+      POSTGRES_DB: data_decipher
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - uncypher-internal
+
+  redis:
+    image: redis:7-alpine
+    container_name: uncypher-redis
+    command: >
+      redis-server
+      ${REDIS_PASSWORD:+--requirepass ${REDIS_PASSWORD}}
+      --maxmemory ${REDIS_MAXMEMORY:-256mb}
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - uncypher-internal
+
+  # ===========================================
+  # Backend Service
+  # ===========================================
+  backend:
+    image: siddhsingh/uncypher:backend
+    container_name: uncypher-backend
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@uncypher-postgres:5432/data_decipher
+      REDIS_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379
+      CELERY_BROKER_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379/0
+      CELERY_RESULT_BACKEND: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379/0
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: HS256
+      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: ${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:-3000}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      FRONTEND_URL: ${FRONTEND_URL}
+      CODEBASE_AGENT_URL: http://uncypher-codebase-backend:8000
+      KB_API_URL: http://uncypher-kb-api:8000
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Egress proxy for GitHub OAuth
+      HTTP_PROXY: http://uncypher-egress-proxy:3128
+      HTTPS_PROXY: http://uncypher-egress-proxy:3128
+      NO_PROXY: uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.backend.rule=Host(`${API_DOMAIN}`)"
+      - "traefik.http.routers.backend.entrypoints=websecure"
+      - "traefik.http.routers.backend.tls.certresolver=${TLS_CERT_RESOLVER:-letsencrypt}"
+      - "traefik.http.routers.backend.middlewares=security-chain@file"
+      - "traefik.http.services.backend.loadbalancer.server.port=8000"
+    restart: unless-stopped
+    networks:
+      - uncypher-internal
+
+  celery-worker:
+    image: siddhsingh/uncypher:backend
+    container_name: uncypher-celery-worker
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@uncypher-postgres:5432/data_decipher
+      REDIS_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379
+      CELERY_BROKER_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379/0
+      CELERY_RESULT_BACKEND: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: python celery_worker.py --loglevel=info
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A celery_worker inspect ping --timeout 5 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - uncypher-internal
+
+  celery-beat:
+    image: siddhsingh/uncypher:backend
+    container_name: uncypher-celery-beat
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@uncypher-postgres:5432/data_decipher
+      REDIS_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379
+      CELERY_BROKER_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379/0
+      CELERY_RESULT_BACKEND: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: python celery_beat.py --loglevel=info
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/celerybeat.pid && kill -0 $(cat /tmp/celerybeat.pid) || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - uncypher-internal
+
+  chat-consumer:
+    image: siddhsingh/uncypher:chat-consumer
+    container_name: uncypher-chat-consumer
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@uncypher-postgres:5432/data_decipher
+      REDIS_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_AGENT_MODEL: ${OPENAI_AGENT_MODEL:-gpt-5.2}
+      CODEBASE_AGENT_URL: http://uncypher-codebase-backend:8000
+      KB_API_URL: http://uncypher-kb-api:8000
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Egress proxy for OpenAI API
+      HTTP_PROXY: http://uncypher-egress-proxy:3128
+      HTTPS_PROXY: http://uncypher-egress-proxy:3128
+      NO_PROXY: uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: python redis_chat_consumer.py
+    healthcheck:
+      test: ["CMD-SHELL", "cat /proc/1/cmdline | grep -q redis_chat_consumer || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - uncypher-internal
+
+  # ===========================================
+  # Frontend Service
+  # ===========================================
+  frontend:
+    image: siddhsingh/uncypher:frontend
+    container_name: uncypher-frontend
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+      INTERNAL_API_URL: http://uncypher-backend:8000
+      NEXT_PUBLIC_KBV1_URL: ${NEXT_PUBLIC_KBV1_URL}
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "node -e 'fetch(\"http://127.0.0.1:3000/\").then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=Host(`${FRONTEND_DOMAIN}`)"
+      - "traefik.http.routers.frontend.entrypoints=websecure"
+      - "traefik.http.routers.frontend.tls.certresolver=${TLS_CERT_RESOLVER:-letsencrypt}"
+      - "traefik.http.routers.frontend.middlewares=security-chain@file"
+      - "traefik.http.services.frontend.loadbalancer.server.port=3000"
+    restart: unless-stopped
+    networks:
+      - uncypher-internal
+
+  # ===========================================
+  # Knowledge Base Service
+  # ===========================================
+  kb-postgres:
+    image: postgres:16
+    container_name: uncypher-kb-postgres
+    environment:
+      POSTGRES_DB: kb
+      POSTGRES_USER: ${KB_POSTGRES_USER:-kb}
+      POSTGRES_PASSWORD: ${KB_POSTGRES_PASSWORD}
+    volumes:
+      - kb_postgres_data:/var/lib/postgresql/data
+      - ./kb-init-sql:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${KB_POSTGRES_USER:-kb}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - uncypher-internal
+
+  kb-redis:
+    image: falkordb/falkordb:edge
+    container_name: uncypher-kb-redis
+    volumes:
+      - kb_redis_data:/var/lib/falkordb/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "PING"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - uncypher-internal
+
+  kb-session-redis:
+    image: redis:7
+    container_name: uncypher-kb-session-redis
+    command: ["redis-server", "--port", "6380"]
+    volumes:
+      - kb_session_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6380", "PING"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - uncypher-internal
+
+  kb-api:
+    image: siddhsingh/uncypher:kb-api
+    container_name: uncypher-kb-api
+    environment:
+      POSTGRES_HOST: uncypher-kb-postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${KB_POSTGRES_USER:-kb}
+      POSTGRES_PASSWORD: ${KB_POSTGRES_PASSWORD}
+      POSTGRES_DB: kb
+      REDIS_HOST: uncypher-kb-redis
+      REDIS_PORT: 6379
+      SESSION_REDIS_HOST: uncypher-kb-session-redis
+      SESSION_REDIS_PORT: 6380
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+    depends_on:
+      kb-postgres:
+        condition: service_healthy
+      kb-redis:
+        condition: service_healthy
+      kb-session-redis:
+        condition: service_healthy
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.kb-api.rule=Host(`${KB_DOMAIN}`)"
+      - "traefik.http.routers.kb-api.entrypoints=websecure"
+      - "traefik.http.routers.kb-api.tls.certresolver=${TLS_CERT_RESOLVER:-letsencrypt}"
+      - "traefik.http.routers.kb-api.middlewares=security-chain@file"
+      - "traefik.http.services.kb-api.loadbalancer.server.port=8000"
+    restart: unless-stopped
+    networks:
+      - uncypher-internal
+
+  # ===========================================
+  # Codebase Agent Service
+  # ===========================================
+  codebase-backend:
+    image: siddhsingh/uncypher:codebase-backend
+    container_name: uncypher-codebase-backend
+    volumes:
+      - codebase_repo_data:/code
+      - codebase_app_data:/app/data
+    environment:
+      PYTHONUNBUFFERED: "1"
+      CODEX_RUNNER_URL: "http://uncypher-codex-runner:9100"
+      CLAUDE_RUNNER_URL: "http://uncypher-claude-runner:9000"
+      DEFAULT_CODEBASE_AGENT: ${DEFAULT_CODEBASE_AGENT:-claude}
+    command: uvicorn app:app --host 0.0.0.0 --port 8000
+    depends_on:
+      codebase-codex-runner:
+        condition: service_healthy
+      codebase-claude-runner:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((\"127.0.0.1\",8000)); s.close()'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.codebase.rule=Host(`${CODEBASE_DOMAIN}`)"
+      - "traefik.http.routers.codebase.entrypoints=websecure"
+      - "traefik.http.routers.codebase.tls.certresolver=${TLS_CERT_RESOLVER:-letsencrypt}"
+      - "traefik.http.routers.codebase.middlewares=security-chain@file"
+      - "traefik.http.services.codebase.loadbalancer.server.port=8000"
+    restart: unless-stopped
+    networks:
+      - uncypher-internal
+
+  codebase-codex-runner:
+    image: siddhsingh/uncypher:codebase-codex-runner
+    container_name: uncypher-codex-runner
+    volumes:
+      - codebase_repo_data:/code
+      - codex_credentials:/root/.codex
+    environment:
+      CODEX_REPO_ROOT: /code
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Egress proxy for OpenAI CLI
+      HTTP_PROXY: http://uncypher-egress-proxy:3128
+      HTTPS_PROXY: http://uncypher-egress-proxy:3128
+      NO_PROXY: uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-claude-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9100/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - uncypher-internal
+
+  codebase-claude-runner:
+    image: siddhsingh/uncypher:codebase-claude-runner
+    container_name: uncypher-claude-runner
+    volumes:
+      - codebase_repo_data:/code
+      - claude_credentials:/root/.config/claude
+    environment:
+      CLAUDE_REPO_ROOT: /code
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Egress proxy for Anthropic CLI
+      HTTP_PROXY: http://uncypher-egress-proxy:3128
+      HTTPS_PROXY: http://uncypher-egress-proxy:3128
+      NO_PROXY: uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-claude-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - uncypher-internal
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  traefik_certs:
+  traefik_logs:
+  egress_logs:
+  postgres_data:
+  redis_data:
+  kb_postgres_data:
+  kb_redis_data:
+  kb_session_data:
+  codebase_repo_data:
+  codebase_app_data:
+  codex_credentials:
+  claude_credentials:
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  # Internal network — no internet access. All services communicate here.
+  uncypher-internal:
+    driver: bridge
+    internal: true
+  # Egress network — internet access via Squid proxy only.
+  uncypher-egress:
+    driver: bridge

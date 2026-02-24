@@ -1,0 +1,24 @@
+# =============================================================================
+# Traefik Dynamic Configuration — TLS Options
+# =============================================================================
+# TLS cipher suite and version policy. Always loaded.
+#
+# To use static certificates instead of Let's Encrypt:
+#   1. Place certs in ./certs/: fullchain.pem + privkey.pem
+#   2. Set TLS_CERT_RESOLVER= (empty) in .env
+#   3. Uncomment the "certificates" section below
+# =============================================================================
+
+tls:
+  # Uncomment for static certificates:
+  # certificates:
+  #   - certFile: /certs/static/fullchain.pem
+  #     keyFile: /certs/static/privkey.pem
+  options:
+    default:
+      minVersion: VersionTLS12
+      cipherSuites:
+        - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+        - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+        - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+        - TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
