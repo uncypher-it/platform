@@ -465,6 +465,10 @@ services:
       CODEX_RUNNER_URL: "http://uncypher-codex-runner:9100"
       CLAUDE_RUNNER_URL: "http://uncypher-claude-runner:9000"
       DEFAULT_CODEBASE_AGENT: ${DEFAULT_CODEBASE_AGENT:-claude}
+      # Egress proxy for git clone
+      HTTP_PROXY: http://uncypher-egress-proxy:3128
+      HTTPS_PROXY: http://uncypher-egress-proxy:3128
+      NO_PROXY: uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-claude-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
     command: uvicorn app:app --host 0.0.0.0 --port 8000
     depends_on:
       codebase-codex-runner:
