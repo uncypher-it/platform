@@ -185,6 +185,7 @@ services:
       REDIS_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379
       CELERY_BROKER_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379/0
       CELERY_RESULT_BACKEND: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379/0
+      CODEBASE_AGENT_URL: http://uncypher-codebase-backend:8000
     depends_on:
       postgres:
         condition: service_healthy
@@ -230,14 +231,22 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@uncypher-postgres:5432/data_decipher
       REDIS_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379
       OPENAI_API_KEY: ${OPENAI_API_KEY}
-      OPENAI_AGENT_MODEL: ${OPENAI_AGENT_MODEL:-gpt-5.2}
+      OPENAI_AGENT_MODEL: ${OPENAI_AGENT_MODEL:-gpt-4o}
       CODEBASE_AGENT_URL: http://uncypher-codebase-backend:8000
       KB_API_URL: http://uncypher-kb-api:8000
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      FRONTEND_URL: ${FRONTEND_URL}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      IS_SANDBOX: "1"
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Egress proxy for OpenAI API
       HTTP_PROXY: http://uncypher-egress-proxy:3128
       HTTPS_PROXY: http://uncypher-egress-proxy:3128
       NO_PROXY: uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
+    volumes:
+      - codebase_repo_data:/code:ro
+      - claude_credentials:/root/.claude
     depends_on:
       postgres:
         condition: service_healthy
@@ -263,6 +272,7 @@ services:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
       INTERNAL_API_URL: http://uncypher-backend:8000
       NEXT_PUBLIC_KBV1_URL: ${NEXT_PUBLIC_KBV1_URL}
+      NEXT_PUBLIC_KB_API_URL: ${NEXT_PUBLIC_KBV1_URL}
     depends_on:
       - backend
     healthcheck:
@@ -332,6 +342,42 @@ services:
     networks:
       - uncypher-internal
 
+  kb-chroma:
+    image: ghcr.io/chroma-core/chroma:0.5.23
+    container_name: uncypher-kb-chroma
+    environment:
+      CHROMA_SERVER_HOST: 0.0.0.0
+      CHROMA_SERVER_HTTP_PORT: "8000"
+    volumes:
+      - kb_chroma_data:/chroma/.chroma
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/api/v1/collections"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - uncypher-internal
+
+
+  kb-elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: uncypher-kb-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    volumes:
+      - kb_es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - uncypher-internal
+
   kb-api:
     image: siddhsingh/uncypher:kb-api
     container_name: uncypher-kb-api
@@ -345,13 +391,26 @@ services:
       REDIS_PORT: 6379
       SESSION_REDIS_HOST: uncypher-kb-session-redis
       SESSION_REDIS_PORT: 6380
+      CHROMA_HOST: uncypher-kb-chroma
+      CHROMA_PORT: 8000
+      ELASTICSEARCH_HOST: uncypher-kb-elasticsearch
+      ELASTICSEARCH_PORT: 9200
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      # Proxy for embedding model download
+      HTTP_PROXY: http://uncypher-egress-proxy:3128
+      HTTPS_PROXY: http://uncypher-egress-proxy:3128
+      NO_PROXY: uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-kb-chroma,uncypher-kb-elasticsearch,uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-egress-proxy,localhost,127.0.0.1
     depends_on:
+      kb-chroma:
+        condition: service_healthy
       kb-postgres:
         condition: service_healthy
       kb-redis:
         condition: service_healthy
       kb-session-redis:
+        condition: service_healthy
+      kb-elasticsearch:
         condition: service_healthy
     command: uvicorn main:app --host 0.0.0.0 --port 8000
     healthcheck:
@@ -361,11 +420,33 @@ services:
       retries: 5
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.kb-api.rule=Host(`${KB_DOMAIN}`)"
+      - "traefik.http.routers.kb-api.rule=Host(`${KB_DOMAIN}`) && (PathPrefix(`/graph`) || PathPrefix(`/query-reuse`) || PathPrefix(`/health`) || PathPrefix(`/rebuild-graph`) || PathPrefix(`/nodes`) || PathPrefix(`/descriptions`) || PathPrefix(`/metrics`))"
+      - "traefik.http.routers.kb-api.priority=20"
       - "traefik.http.routers.kb-api.entrypoints=websecure"
       - "traefik.http.routers.kb-api.tls.certresolver=${TLS_CERT_RESOLVER:-letsencrypt}"
       - "traefik.http.routers.kb-api.middlewares=security-chain@file"
       - "traefik.http.services.kb-api.loadbalancer.server.port=8000"
+    restart: unless-stopped
+    networks:
+      - uncypher-internal
+
+  kb-frontend:
+    image: siddhsingh/uncypher:kb-frontend
+    container_name: uncypher-kb-frontend
+    environment:
+      VITE_KBV1_API_URL: ${NEXT_PUBLIC_KBV1_URL}
+      VITE_AUTH_API_URL: ${NEXT_PUBLIC_API_URL}
+      VITE_ALLOWED_PARENT_ORIGINS: ${FRONTEND_URL}
+    depends_on:
+      - kb-api
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.kb-frontend.rule=Host(`${KB_DOMAIN}`)"
+      - "traefik.http.routers.kb-frontend.priority=10"
+      - "traefik.http.routers.kb-frontend.entrypoints=websecure"
+      - "traefik.http.routers.kb-frontend.tls.certresolver=${TLS_CERT_RESOLVER:-letsencrypt}"
+      - "traefik.http.routers.kb-frontend.middlewares=security-chain@file"
+      - "traefik.http.services.kb-frontend.loadbalancer.server.port=3000"
     restart: unless-stopped
     networks:
       - uncypher-internal
@@ -433,7 +514,7 @@ services:
     container_name: uncypher-claude-runner
     volumes:
       - codebase_repo_data:/code
-      - claude_credentials:/root/.config/claude
+      - claude_credentials:/root/.claude
     environment:
       CLAUDE_REPO_ROOT: /code
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -446,6 +527,27 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+    restart: unless-stopped
+    networks:
+      - uncypher-internal
+
+  # ===========================================
+  # Demo Data PostgreSQL
+  # ===========================================
+  demo-postgres:
+    image: postgres:16
+    container_name: uncypher-demo-postgres
+    environment:
+      POSTGRES_DB: ${DEMO_DB_NAME:-demo_ecommerce}
+      POSTGRES_USER: ${DEMO_DB_USER:-demo}
+      POSTGRES_PASSWORD: ${DEMO_DB_PASSWORD:-demo}
+    volumes:
+      - demo_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DEMO_DB_USER:-demo}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
     networks:
       - uncypher-internal
@@ -466,6 +568,9 @@ volumes:
   codebase_app_data:
   codex_credentials:
   claude_credentials:
+  kb_chroma_data:
+  kb_es_data:
+  demo_postgres_data:
 
 # =============================================================================
 # Networks
