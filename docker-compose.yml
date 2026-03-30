@@ -186,6 +186,10 @@ services:
       CELERY_BROKER_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379/0
       CELERY_RESULT_BACKEND: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379/0
       CODEBASE_AGENT_URL: http://uncypher-codebase-backend:8000
+      # Egress proxy for BigQuery / external API OAuth
+      HTTP_PROXY: http://uncypher-egress-proxy:3128
+      HTTPS_PROXY: http://uncypher-egress-proxy:3128
+      NO_PROXY: uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
     depends_on:
       postgres:
         condition: service_healthy
@@ -200,6 +204,7 @@ services:
     restart: unless-stopped
     networks:
       - uncypher-internal
+      - uncypher-egress
 
   celery-beat:
     image: siddhsingh/uncypher:backend
@@ -239,6 +244,8 @@ services:
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
       IS_SANDBOX: "1"
+      ORG_CODEBASE_CONTEXT: ${ORG_CODEBASE_CONTEXT:-}
+      ORG_DATABASE_CONTEXT: ${ORG_DATABASE_CONTEXT:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Egress proxy for OpenAI API
       HTTP_PROXY: http://uncypher-egress-proxy:3128
