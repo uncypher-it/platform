@@ -96,6 +96,7 @@ services:
   postgres:
     image: postgres:16
     container_name: uncypher-postgres
+    command: postgres -c idle_in_transaction_session_timeout=900000
     environment:
       POSTGRES_DB: data_decipher
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
@@ -186,6 +187,7 @@ services:
       CELERY_BROKER_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379/0
       CELERY_RESULT_BACKEND: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379/0
       CODEBASE_AGENT_URL: http://uncypher-codebase-backend:8000
+      KB_API_URL: http://uncypher-kb-api:8000
       # Egress proxy for BigQuery / external API OAuth
       HTTP_PROXY: http://uncypher-egress-proxy:3128
       HTTPS_PROXY: http://uncypher-egress-proxy:3128
@@ -304,6 +306,7 @@ services:
   kb-postgres:
     image: postgres:16
     container_name: uncypher-kb-postgres
+    command: postgres -c idle_in_transaction_session_timeout=900000
     environment:
       POSTGRES_DB: kb
       POSTGRES_USER: ${KB_POSTGRES_USER:-kb}
@@ -452,7 +455,15 @@ services:
       - "traefik.http.routers.kb-frontend.priority=10"
       - "traefik.http.routers.kb-frontend.entrypoints=websecure"
       - "traefik.http.routers.kb-frontend.tls.certresolver=${TLS_CERT_RESOLVER:-letsencrypt}"
-      - "traefik.http.routers.kb-frontend.middlewares=security-chain@file"
+      # KB frontend is embedded as iframe in main app — must allow cross-origin framing
+      - "traefik.http.middlewares.kb-headers.headers.customframeoptionsvalue="
+      - "traefik.http.middlewares.kb-headers.headers.contentsecuritypolicy=frame-ancestors 'self' https://${FRONTEND_DOMAIN}"
+      - "traefik.http.middlewares.kb-headers.headers.stsseconds=31536000"
+      - "traefik.http.middlewares.kb-headers.headers.stsincludesubdomains=true"
+      - "traefik.http.middlewares.kb-headers.headers.contenttypenosniff=true"
+      - "traefik.http.middlewares.kb-headers.headers.browserxssfilter=true"
+      - "traefik.http.middlewares.kb-headers.headers.referrerpolicy=strict-origin-when-cross-origin"
+      - "traefik.http.routers.kb-frontend.middlewares=kb-headers"
       - "traefik.http.services.kb-frontend.loadbalancer.server.port=3000"
     restart: unless-stopped
     networks:

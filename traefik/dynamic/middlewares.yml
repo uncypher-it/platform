@@ -19,3 +19,17 @@ http:
       chain:
         middlewares:
           - security-headers
+    # KB frontend is embedded as iframe in main app — needs relaxed frame policy
+    kb-security-headers:
+      headers:
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: true
+        customFrameOptionsValue: ""
+        contentTypeNosniff: true
+        browserXssFilter: true
+        referrerPolicy: "strict-origin-when-cross-origin"
+    kb-security-chain:
+      chain:
+        middlewares:
+          - kb-security-headers
