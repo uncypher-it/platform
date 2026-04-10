@@ -14,9 +14,24 @@
 # Anthropic API (Claude Code / Codex)
 .anthropic.com
 
+# Claude Code OAuth (login + token refresh)
+.claude.ai
+.claude.com
+
 # GitHub (OAuth + repository cloning)
 .github.com
 .githubusercontent.com
 
+# HuggingFace (embedding model for KB semantic search)
+.huggingface.co
+.hf.co
+
+# AWS S3 (Chroma ONNX embedding models)
+.amazonaws.com
+
+# Google Cloud (BigQuery)
+.googleapis.com
+
 # Let's Encrypt (when TLS_MODE=letsencrypt)
 .letsencrypt.org
+.api.letsencrypt.org
