@@ -135,7 +135,7 @@ services:
   # Backend Service
   # ===========================================
   backend:
-    image: siddhsingh/uncypher:backend
+    image: siddhsingh/uncypher:backend-20apr-arm
     container_name: uncypher-backend
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@uncypher-postgres:5432/data_decipher
@@ -152,15 +152,20 @@ services:
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DEFAULT_COMPANY_NAME: ${DEFAULT_COMPANY_NAME:-Default Company}
+      DEFAULT_COMPANY_SLUG: ${DEFAULT_COMPANY_SLUG:-default}
+      DEFAULT_COMPANY_ADMIN_EMAIL: ${DEFAULT_COMPANY_ADMIN_EMAIL:-}
       # Egress proxy for GitHub OAuth
       HTTP_PROXY: http://uncypher-egress-proxy:3128
       HTTPS_PROXY: http://uncypher-egress-proxy:3128
-      NO_PROXY: uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
+      NO_PROXY: kb-api,kb-postgres,kb-redis,kb-session-redis,kb-chroma,kb-elasticsearch,postgres,redis,uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      - codebase_repo_data:/code:ro
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -179,19 +184,22 @@ services:
       - uncypher-internal
 
   celery-worker:
-    image: siddhsingh/uncypher:backend
+    image: siddhsingh/uncypher:backend-20apr-arm
     container_name: uncypher-celery-worker
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@uncypher-postgres:5432/data_decipher
       REDIS_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379
       CELERY_BROKER_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379/0
       CELERY_RESULT_BACKEND: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379/0
+      # Same secret as backend + kb-api so kb-tokens minted here verify.
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
       CODEBASE_AGENT_URL: http://uncypher-codebase-backend:8000
       KB_API_URL: http://uncypher-kb-api:8000
       # Egress proxy for BigQuery / external API OAuth
       HTTP_PROXY: http://uncypher-egress-proxy:3128
       HTTPS_PROXY: http://uncypher-egress-proxy:3128
-      NO_PROXY: uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
+      NO_PROXY: kb-api,kb-postgres,kb-redis,kb-session-redis,kb-chroma,kb-elasticsearch,postgres,redis,uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
     depends_on:
       postgres:
         condition: service_healthy
@@ -209,13 +217,16 @@ services:
       - uncypher-egress
 
   celery-beat:
-    image: siddhsingh/uncypher:backend
+    image: siddhsingh/uncypher:backend-20apr-arm
     container_name: uncypher-celery-beat
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@uncypher-postgres:5432/data_decipher
       REDIS_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379
       CELERY_BROKER_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379/0
       CELERY_RESULT_BACKEND: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379/0
+      # Defensive: beat doesn't call kb-api today but shares the codepath.
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
     depends_on:
       postgres:
         condition: service_healthy
@@ -232,13 +243,16 @@ services:
       - uncypher-internal
 
   chat-consumer:
-    image: siddhsingh/uncypher:chat-consumer
+    image: siddhsingh/uncypher:chat-consumer-20apr-arm
     container_name: uncypher-chat-consumer
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@uncypher-postgres:5432/data_decipher
       REDIS_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENAI_AGENT_MODEL: ${OPENAI_AGENT_MODEL:-gpt-4o}
+      # Same secret as backend + kb-api so kb-tokens minted here verify.
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
       CODEBASE_AGENT_URL: http://uncypher-codebase-backend:8000
       KB_API_URL: http://uncypher-kb-api:8000
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -252,7 +266,7 @@ services:
       # Egress proxy for OpenAI API
       HTTP_PROXY: http://uncypher-egress-proxy:3128
       HTTPS_PROXY: http://uncypher-egress-proxy:3128
-      NO_PROXY: uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
+      NO_PROXY: kb-api,kb-postgres,kb-redis,kb-session-redis,kb-chroma,kb-elasticsearch,postgres,redis,uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
     volumes:
       - codebase_repo_data:/code:ro
       - claude_credentials:/root/.claude
@@ -275,7 +289,7 @@ services:
   # Frontend Service
   # ===========================================
   frontend:
-    image: siddhsingh/uncypher:frontend
+    image: siddhsingh/uncypher:frontend-20apr-arm
     container_name: uncypher-frontend
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
@@ -389,7 +403,7 @@ services:
       - uncypher-internal
 
   kb-api:
-    image: siddhsingh/uncypher:kb-api
+    image: siddhsingh/uncypher:kb-api-20apr-arm
     container_name: uncypher-kb-api
     environment:
       POSTGRES_HOST: uncypher-kb-postgres
@@ -406,6 +420,10 @@ services:
       ELASTICSEARCH_HOST: uncypher-kb-elasticsearch
       ELASTICSEARCH_PORT: 9200
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Same secret as the backend so kb-tokens it mints verify here.
+      # kb-api fails closed (500) if unset — see auth.py:36-42.
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
       # Proxy for embedding model download
       HTTP_PROXY: http://uncypher-egress-proxy:3128
@@ -441,7 +459,7 @@ services:
       - uncypher-internal
 
   kb-frontend:
-    image: siddhsingh/uncypher:kb-frontend
+    image: siddhsingh/uncypher:kb-frontend-20apr-arm
     container_name: uncypher-kb-frontend
     environment:
       VITE_KBV1_API_URL: ${NEXT_PUBLIC_KBV1_URL}
@@ -473,7 +491,7 @@ services:
   # Codebase Agent Service
   # ===========================================
   codebase-backend:
-    image: siddhsingh/uncypher:codebase-backend
+    image: siddhsingh/uncypher:codebase-backend-20apr-arm
     container_name: uncypher-codebase-backend
     volumes:
       - codebase_repo_data:/code
@@ -486,7 +504,7 @@ services:
       # Egress proxy for git clone
       HTTP_PROXY: http://uncypher-egress-proxy:3128
       HTTPS_PROXY: http://uncypher-egress-proxy:3128
-      NO_PROXY: uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-claude-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
+      NO_PROXY: kb-api,kb-postgres,kb-redis,kb-session-redis,kb-chroma,kb-elasticsearch,postgres,redis,uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-claude-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
     command: uvicorn app:app --host 0.0.0.0 --port 8000
     depends_on:
       codebase-codex-runner:
@@ -510,7 +528,7 @@ services:
       - uncypher-internal
 
   codebase-codex-runner:
-    image: siddhsingh/uncypher:codebase-codex-runner
+    image: siddhsingh/uncypher:codebase-codex-runner-20apr-arm
     container_name: uncypher-codex-runner
     volumes:
       - codebase_repo_data:/code
@@ -521,7 +539,7 @@ services:
       # Egress proxy for OpenAI CLI
       HTTP_PROXY: http://uncypher-egress-proxy:3128
       HTTPS_PROXY: http://uncypher-egress-proxy:3128
-      NO_PROXY: uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-claude-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
+      NO_PROXY: kb-api,kb-postgres,kb-redis,kb-session-redis,kb-chroma,kb-elasticsearch,postgres,redis,uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-claude-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:9100/health"]
       interval: 30s
@@ -532,7 +550,7 @@ services:
       - uncypher-internal
 
   codebase-claude-runner:
-    image: siddhsingh/uncypher:codebase-claude-runner
+    image: siddhsingh/uncypher:codebase-claude-runner-20apr-arm
     container_name: uncypher-claude-runner
     volumes:
       - codebase_repo_data:/code
@@ -543,7 +561,7 @@ services:
       # Egress proxy for Anthropic CLI
       HTTP_PROXY: http://uncypher-egress-proxy:3128
       HTTPS_PROXY: http://uncypher-egress-proxy:3128
-      NO_PROXY: uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-claude-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
+      NO_PROXY: kb-api,kb-postgres,kb-redis,kb-session-redis,kb-chroma,kb-elasticsearch,postgres,redis,uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-claude-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:9000/health"]
       interval: 30s
