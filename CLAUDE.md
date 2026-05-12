@@ -69,6 +69,7 @@ All service-internal URLs are computed inside `docker-compose.yml`. The customer
 - `RATE_LIMIT_AVERAGE/BURST` — rate limiting
 - `TLS_CERT_RESOLVER` — `letsencrypt` (default) or empty for static certs
 - `LOG_LEVEL` — `INFO` (default)
+- `TAG_SUFFIX` — overrides the tag suffix on every `siddhsingh/uncypher:*` image (e.g. `-12may-x86` for an x86_64 build dated 12 May). When unset, the compose default (currently `-20apr-arm`) is used so existing deployments keep working.
 
 ## Common Operations
 
