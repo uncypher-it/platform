@@ -310,6 +310,15 @@ services:
       - "traefik.http.routers.frontend.tls.certresolver=${TLS_CERT_RESOLVER:-letsencrypt}"
       - "traefik.http.routers.frontend.middlewares=security-chain@file"
       - "traefik.http.services.frontend.loadbalancer.server.port=3000"
+      # Redirect www.<FRONTEND_DOMAIN> -> apex (301). HTTP entrypoint already redirects to HTTPS globally.
+      - "traefik.http.routers.frontend-www.rule=Host(`www.${FRONTEND_DOMAIN}`)"
+      - "traefik.http.routers.frontend-www.entrypoints=websecure"
+      - "traefik.http.routers.frontend-www.tls.certresolver=${TLS_CERT_RESOLVER:-letsencrypt}"
+      - "traefik.http.routers.frontend-www.middlewares=www-to-apex"
+      - "traefik.http.routers.frontend-www.service=frontend"
+      - "traefik.http.middlewares.www-to-apex.redirectregex.regex=^https?://www[.](.+)"
+      - "traefik.http.middlewares.www-to-apex.redirectregex.replacement=https://$${1}"
+      - "traefik.http.middlewares.www-to-apex.redirectregex.permanent=true"
     restart: unless-stopped
     networks:
       - uncypher-internal
