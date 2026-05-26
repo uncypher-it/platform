@@ -335,6 +335,7 @@ services:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
       INTERNAL_API_URL: http://uncypher-backend:8000
       NEXT_PUBLIC_KBV1_URL: ${NEXT_PUBLIC_KBV1_URL}
+      NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL}
       NEXT_PUBLIC_KB_API_URL: ${NEXT_PUBLIC_KBV1_URL}
     depends_on:
       - backend
