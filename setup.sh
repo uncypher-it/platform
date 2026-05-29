@@ -278,8 +278,10 @@ if [ -n "$ANTHROPIC_API_KEY" ]; then
   set_env "ANTHROPIC_API_KEY" "$ANTHROPIC_API_KEY"
   info "Anthropic API key saved"
 else
-  info "Skipped — authenticate later with:"
-  echo "    docker compose run --rm codebase-claude-runner claude login"
+  info "Skipped — authenticate later on the host with:"
+  echo "    claude login"
+  echo "    sudo cp systemd/claude-auth-refresh.service /etc/systemd/system/"
+  echo "    sudo systemctl daemon-reload && sudo systemctl enable --now claude-auth-refresh.service"
 fi
 echo ""
 

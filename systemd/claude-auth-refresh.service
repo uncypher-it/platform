@@ -1,0 +1,18 @@
+[Unit]
+Description=Refresh Claude OAuth credentials for Uncypher containers
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/uncypher
+Environment=COMPOSE_PROJECT_NAME=uncypher
+Environment=HOME=/home/ec2-user
+Environment=PATH=/home/ec2-user/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/ec2-user/uncypher/scripts/claude-oauth-refresh-daemon.sh
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

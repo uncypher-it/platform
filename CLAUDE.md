@@ -98,4 +98,4 @@ docker compose pull && docker compose up -d
 - **TLS errors**: For Let's Encrypt, ensure domains resolve to the server IP and ports 80/443 open
 - **Egress blocked**: Check `egress-proxy/allowed_domains.txt` for missing domains
 - **DB init fails**: KB init SQL runs only on first boot. To re-run: `docker compose down -v` (destroys data)
-- **Codebase agent 401**: Set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in `.env`, or run `docker compose run --rm codebase-claude-runner claude login` for OAuth
+- **Claude/codebase agent 401**: Set `ANTHROPIC_API_KEY`, or run `claude login` on the host and keep `claude_credentials` fresh with `systemd/claude-auth-refresh.service`
