@@ -166,6 +166,11 @@ services:
         condition: service_healthy
     volumes:
       - codebase_repo_data:/code:ro
+      # KB raw-SQL "AI cleanup" runs the Claude Agent SDK in-process here, so
+      # the backend needs the same OAuth credentials as chat-consumer / the
+      # claude-runner. Without this, cleanup_oauth_configured() is False and the
+      # endpoint returns "AI cleanup requires Claude Agent SDK OAuth on this server".
+      - claude_credentials:/root/.claude
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -205,6 +210,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      # KB bulk generation tasks also drive the Claude Agent SDK; share the
+      # same OAuth credentials volume as the backend.
+      - claude_credentials:/root/.claude
     command: python celery_worker.py --loglevel=info
     healthcheck:
       test: ["CMD-SHELL", "celery -A celery_worker inspect ping --timeout 5 || exit 1"]
