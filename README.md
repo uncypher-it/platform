@@ -86,6 +86,16 @@ The installer prompts for each value below. Press Enter to accept defaults where
 
 The setup script also auto-generates a JWT signing key and configures all internal service URLs. Everything is saved to `.env` — edit it anytime and run `docker compose up -d` to apply changes. See `.env.example` for the full list of advanced options.
 
+### Choosing an image tag
+
+Every `siddhsingh/uncypher:*` reference in `docker-compose.yml` is suffixed by `${TAG_SUFFIX:--20apr-arm}` — when `TAG_SUFFIX` is unset, the current SuperK ARM build is used. To pin a different build (e.g. an x86_64 build for an Intel/AMD VM), set `TAG_SUFFIX` in `.env`:
+
+```bash
+TAG_SUFFIX=-12may-x86   # x86_64 build dated 12 May
+```
+
+Then `docker compose pull && docker compose up -d`. Rolling back is just changing the suffix and re-running.
+
 ---
 
 ## TLS Setup
