@@ -13,6 +13,7 @@ This directory is a self-contained deployment package. All services use pre-buil
 | backend | siddhsingh/uncypher:backend | 8000 (internal) | FastAPI REST API |
 | celery-worker | siddhsingh/uncypher:backend | internal | Background task processor |
 | celery-beat | siddhsingh/uncypher:backend | internal | Periodic task scheduler |
+| materializer | siddhsingh/uncypher:backend | internal | Caches per-org source-of-truth as markdown under `/code/<org_slug>/.claude/` for the Claude agent (Agent Harness v3, Wave 8) |
 | chat-consumer | siddhsingh/uncypher:chat-consumer | internal | AI chat via Redis streams + OpenAI |
 | frontend | siddhsingh/uncypher:frontend | 3000 (internal) | Next.js web UI |
 | kb-postgres | postgres:16 | 5432 (internal) | Knowledge base database (`kb`) |

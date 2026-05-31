@@ -135,7 +135,7 @@ services:
   # Backend Service
   # ===========================================
   backend:
-    image: siddhsingh/uncypher:backend-20apr-arm
+    image: siddhsingh/uncypher:backend-25may-arm
     container_name: uncypher-backend
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@uncypher-postgres:5432/data_decipher
@@ -189,7 +189,7 @@ services:
       - uncypher-internal
 
   celery-worker:
-    image: siddhsingh/uncypher:backend-20apr-arm
+    image: siddhsingh/uncypher:backend-25may-arm
     container_name: uncypher-celery-worker
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@uncypher-postgres:5432/data_decipher
@@ -226,7 +226,7 @@ services:
       - uncypher-egress
 
   celery-beat:
-    image: siddhsingh/uncypher:backend-20apr-arm
+    image: siddhsingh/uncypher:backend-25may-arm
     container_name: uncypher-celery-beat
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@uncypher-postgres:5432/data_decipher
@@ -251,8 +251,48 @@ services:
     networks:
       - uncypher-internal
 
+  # ===========================================
+  # Materializer (Agent Harness v3, Wave 8)
+  # ===========================================
+  # Redis Streams worker that caches per-org source-of-truth (org profile,
+  # data flow guides, canonical metrics, table descriptions, saved SQL cards)
+  # as markdown under /code/<org_slug>/.claude/. The Claude agent reads this
+  # tree at sub-millisecond latency instead of round-tripping to Postgres/KB-API
+  # on every conversation start. See docs in the backend repo:
+  # agentic_claude/materializer/{worker,renderers,reconciliation}.py
+  materializer:
+    image: siddhsingh/uncypher:backend-25may-arm
+    container_name: uncypher-materializer
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@uncypher-postgres:5432/data_decipher
+      REDIS_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379
+      KB_API_URL: http://uncypher-kb-api:8000
+      # Same secret as backend + kb-api so kb-tokens minted here verify.
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      AGENT_CONTEXT_CODE_ROOT: /code
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - codebase_repo_data:/code
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kb-api:
+        condition: service_healthy
+    command: python -m agentic_claude.materializer.worker
+    healthcheck:
+      test: ["CMD-SHELL", "cat /proc/1/cmdline | grep -q materializer || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - uncypher-internal
+
   chat-consumer:
-    image: siddhsingh/uncypher:chat-consumer-20apr-arm
+    image: siddhsingh/uncypher:chat-consumer-25may-arm
     container_name: uncypher-chat-consumer
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@uncypher-postgres:5432/data_decipher
@@ -298,12 +338,13 @@ services:
   # Frontend Service
   # ===========================================
   frontend:
-    image: siddhsingh/uncypher:frontend-20apr-arm
+    image: siddhsingh/uncypher:frontend-25may-arm
     container_name: uncypher-frontend
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
       INTERNAL_API_URL: http://uncypher-backend:8000
       NEXT_PUBLIC_KBV1_URL: ${NEXT_PUBLIC_KBV1_URL}
+      NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL}
       NEXT_PUBLIC_KB_API_URL: ${NEXT_PUBLIC_KBV1_URL}
     depends_on:
       - backend
@@ -421,7 +462,7 @@ services:
       - uncypher-internal
 
   kb-api:
-    image: siddhsingh/uncypher:kb-api-20apr-arm
+    image: siddhsingh/uncypher:kb-api-25may-arm
     container_name: uncypher-kb-api
     environment:
       POSTGRES_HOST: uncypher-kb-postgres
@@ -477,7 +518,7 @@ services:
       - uncypher-internal
 
   kb-frontend:
-    image: siddhsingh/uncypher:kb-frontend-20apr-arm
+    image: siddhsingh/uncypher:kb-frontend-25may-arm
     container_name: uncypher-kb-frontend
     environment:
       VITE_KBV1_API_URL: ${NEXT_PUBLIC_KBV1_URL}
@@ -509,7 +550,7 @@ services:
   # Codebase Agent Service
   # ===========================================
   codebase-backend:
-    image: siddhsingh/uncypher:codebase-backend-20apr-arm
+    image: siddhsingh/uncypher:codebase-backend-25may-arm
     container_name: uncypher-codebase-backend
     volumes:
       - codebase_repo_data:/code
@@ -546,7 +587,7 @@ services:
       - uncypher-internal
 
   codebase-codex-runner:
-    image: siddhsingh/uncypher:codebase-codex-runner-20apr-arm
+    image: siddhsingh/uncypher:codebase-codex-runner-25may-arm
     container_name: uncypher-codex-runner
     volumes:
       - codebase_repo_data:/code
@@ -568,7 +609,7 @@ services:
       - uncypher-internal
 
   codebase-claude-runner:
-    image: siddhsingh/uncypher:codebase-claude-runner-20apr-arm
+    image: siddhsingh/uncypher:codebase-claude-runner-25may-arm
     container_name: uncypher-claude-runner
     volumes:
       - codebase_repo_data:/code
