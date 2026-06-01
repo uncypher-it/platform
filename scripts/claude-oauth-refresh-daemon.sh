@@ -43,7 +43,8 @@ path = sys.argv[1]
 try:
     with open(path, "r", encoding="utf-8") as handle:
         payload = json.load(handle)
-    expires_at = int(payload.get("expiresAt") or payload.get("expires_at") or 0)
+    oauth = payload.get("claudeAiOauth") or payload
+    expires_at = int(oauth.get("expiresAt") or oauth.get("expires_at") or 0)
 except Exception:
     print(0)
     raise SystemExit(0)
