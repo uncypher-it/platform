@@ -135,7 +135,7 @@ services:
   # Backend Service
   # ===========================================
   backend:
-    image: siddhsingh/uncypher:backend-20apr-arm
+    image: siddhsingh/uncypher:backend-${IMAGE_TAG:-main}
     container_name: uncypher-backend
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@uncypher-postgres:5432/data_decipher
@@ -189,7 +189,7 @@ services:
       - uncypher-internal
 
   celery-worker:
-    image: siddhsingh/uncypher:backend-20apr-arm
+    image: siddhsingh/uncypher:backend-${IMAGE_TAG:-main}
     container_name: uncypher-celery-worker
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@uncypher-postgres:5432/data_decipher
@@ -226,7 +226,7 @@ services:
       - uncypher-egress
 
   celery-beat:
-    image: siddhsingh/uncypher:backend-20apr-arm
+    image: siddhsingh/uncypher:backend-${IMAGE_TAG:-main}
     container_name: uncypher-celery-beat
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@uncypher-postgres:5432/data_decipher
@@ -252,7 +252,7 @@ services:
       - uncypher-internal
 
   chat-consumer:
-    image: siddhsingh/uncypher:chat-consumer-20apr-arm
+    image: siddhsingh/uncypher:chat-consumer-${IMAGE_TAG:-main}
     container_name: uncypher-chat-consumer
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@uncypher-postgres:5432/data_decipher
@@ -298,7 +298,7 @@ services:
   # Frontend Service
   # ===========================================
   frontend:
-    image: siddhsingh/uncypher:frontend-20apr-arm
+    image: siddhsingh/uncypher:frontend-${IMAGE_TAG:-main}
     container_name: uncypher-frontend
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
@@ -421,7 +421,7 @@ services:
       - uncypher-internal
 
   kb-api:
-    image: siddhsingh/uncypher:kb-api-20apr-arm
+    image: siddhsingh/uncypher:kb-api-${IMAGE_TAG:-main}
     container_name: uncypher-kb-api
     environment:
       POSTGRES_HOST: uncypher-kb-postgres
@@ -477,7 +477,7 @@ services:
       - uncypher-internal
 
   kb-frontend:
-    image: siddhsingh/uncypher:kb-frontend-20apr-arm
+    image: siddhsingh/uncypher:kb-frontend-${IMAGE_TAG:-main}
     container_name: uncypher-kb-frontend
     environment:
       VITE_KBV1_API_URL: ${NEXT_PUBLIC_KBV1_URL}
@@ -509,7 +509,7 @@ services:
   # Codebase Agent Service
   # ===========================================
   codebase-backend:
-    image: siddhsingh/uncypher:codebase-backend-20apr-arm
+    image: siddhsingh/uncypher:codebase-backend-${IMAGE_TAG:-main}
     container_name: uncypher-codebase-backend
     volumes:
       - codebase_repo_data:/code
@@ -546,7 +546,7 @@ services:
       - uncypher-internal
 
   codebase-codex-runner:
-    image: siddhsingh/uncypher:codebase-codex-runner-20apr-arm
+    image: siddhsingh/uncypher:codebase-codex-runner-${IMAGE_TAG:-main}
     container_name: uncypher-codex-runner
     volumes:
       - codebase_repo_data:/code
@@ -568,7 +568,7 @@ services:
       - uncypher-internal
 
   codebase-claude-runner:
-    image: siddhsingh/uncypher:codebase-claude-runner-20apr-arm
+    image: siddhsingh/uncypher:codebase-claude-runner-${IMAGE_TAG:-main}
     container_name: uncypher-claude-runner
     volumes:
       - codebase_repo_data:/code
