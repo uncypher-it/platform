@@ -190,5 +190,5 @@ docker compose down -v
 | Frontend shows blank page | Verify `NEXT_PUBLIC_API_URL` matches `API_DOMAIN` in `.env` |
 | TLS certificate errors | Ensure DNS resolves to server IP; check `docker compose logs traefik` |
 | External API calls failing | Check `egress-proxy/allowed_domains.txt` for missing domains |
-| Claude/codebase agent 401 | Set `ANTHROPIC_API_KEY`, or run `claude login` on the host and start `claude-auth-refresh.service` |
+| Claude/codebase agent 401 | OAuth chain expired. Set `ANTHROPIC_API_KEY`, or run `claude login` on the host and enable `claude-auth-refresh.service` — see [`claude-auth/README.md`](claude-auth/README.md) |
 | Port conflicts | Set `TRAEFIK_HTTP_PORT` / `TRAEFIK_HTTPS_PORT` in `.env` |
