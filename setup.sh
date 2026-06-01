@@ -278,8 +278,10 @@ if [ -n "$ANTHROPIC_API_KEY" ]; then
   set_env "ANTHROPIC_API_KEY" "$ANTHROPIC_API_KEY"
   info "Anthropic API key saved"
 else
-  info "Skipped — authenticate later on the host with:"
-  echo "    claude login"
+  info "Skipped — authenticate later on the host. See claude-auth/README.md."
+  echo "    curl -fsSL https://claude.ai/install.sh | bash   # install Claude CLI on host"
+  echo "    claude login                                     # one-time interactive login per VM"
+  echo "    # edit DEPLOY_USER placeholders in systemd/claude-auth-refresh.service first"
   echo "    sudo cp systemd/claude-auth-refresh.service /etc/systemd/system/"
   echo "    sudo systemctl daemon-reload && sudo systemctl enable --now claude-auth-refresh.service"
 fi

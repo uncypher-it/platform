@@ -6,6 +6,11 @@ set -euo pipefail
 
 CLAUDE_HOME="${CLAUDE_HOME:-$HOME/.claude}"
 CLAUDE_CLI="${CLAUDE_CLI:-claude}"
+# Directory containing docker-compose.yml. The sync step runs `docker compose
+# run ...` and must execute from the Compose project root. Do not rely on the
+# process CWD: parameterize it so the daemon works when launched by systemd, by
+# hand, or from any directory. Override per host with COMPOSE_DIR.
+COMPOSE_DIR="${COMPOSE_DIR:-$HOME/uncypher}"
 HOST_CREDENTIALS="${CLAUDE_HOME}/.credentials.json"
 REFRESH_WINDOW_SECONDS="${CLAUDE_REFRESH_WINDOW_SECONDS:-1800}"
 MIN_SLEEP_SECONDS="${CLAUDE_REFRESH_MIN_SLEEP_SECONDS:-300}"
@@ -66,7 +71,12 @@ sync_credentials_to_volume() {
     return 1
   fi
 
-  log "syncing host credentials into claude_credentials volume"
+  if ! cd "$COMPOSE_DIR" 2>/dev/null; then
+    log "compose dir not found at ${COMPOSE_DIR}; set COMPOSE_DIR to the directory containing docker-compose.yml"
+    return 1
+  fi
+
+  log "syncing host credentials into claude_credentials volume (compose dir: ${COMPOSE_DIR})"
   docker compose run --rm --no-deps \
     --volume "${CLAUDE_HOME}:/host-claude:ro" \
     --entrypoint sh \

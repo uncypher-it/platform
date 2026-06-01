@@ -5,14 +5,19 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=ec2-user
-WorkingDirectory=/home/ec2-user/uncypher
+# Replace DEPLOY_USER with the host user that ran `claude login` and owns the
+# Docker Compose deployment (e.g. ec2-user, ubuntu, deploy). Replace
+# /home/DEPLOY_USER and the uncypher path below to match that user's home and
+# the directory containing docker-compose.yml. See claude-auth/README.md.
+User=DEPLOY_USER
+WorkingDirectory=/home/DEPLOY_USER/uncypher
 Environment=COMPOSE_PROJECT_NAME=uncypher
-Environment=HOME=/home/ec2-user
-Environment=PATH=/home/ec2-user/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/home/ec2-user/uncypher/scripts/claude-oauth-refresh-daemon.sh
+Environment=COMPOSE_DIR=/home/DEPLOY_USER/uncypher
+Environment=HOME=/home/DEPLOY_USER
+Environment=PATH=/home/DEPLOY_USER/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/DEPLOY_USER/uncypher/scripts/claude-oauth-refresh-daemon.sh
 Restart=always
-RestartSec=30
+RestartSec=60
 
 [Install]
 WantedBy=multi-user.target
