@@ -155,6 +155,9 @@ services:
       DEFAULT_COMPANY_NAME: ${DEFAULT_COMPANY_NAME:-Default Company}
       DEFAULT_COMPANY_SLUG: ${DEFAULT_COMPANY_SLUG:-default}
       DEFAULT_COMPANY_ADMIN_EMAIL: ${DEFAULT_COMPANY_ADMIN_EMAIL:-}
+      # Optional shared secret gating the one-time /setup bootstrap endpoint.
+      # Backend reads it as Optional[str]; empty/unset disables the gate.
+      SETUP_SECRET: ${SETUP_SECRET:-}
       # Egress proxy for GitHub OAuth
       HTTP_PROXY: http://uncypher-egress-proxy:3128
       HTTPS_PROXY: http://uncypher-egress-proxy:3128
@@ -305,6 +308,9 @@ services:
       INTERNAL_API_URL: http://uncypher-backend:8000
       NEXT_PUBLIC_KBV1_URL: ${NEXT_PUBLIC_KBV1_URL}
       NEXT_PUBLIC_KB_API_URL: ${NEXT_PUBLIC_KBV1_URL}
+      # Required: frontend computes absolute URLs via new URL(NEXT_PUBLIC_SITE_URL).
+      # Without this passthrough the entrypoint can't sed the placeholder and SSR 500s.
+      NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL}
     depends_on:
       - backend
     healthcheck:
