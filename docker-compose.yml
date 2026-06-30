@@ -132,6 +132,27 @@ services:
       - uncypher-internal
 
   # ===========================================
+  # Object Storage (S3-compatible) — chat attachment uploads
+  # ===========================================
+  rustfs:
+    image: rustfs/rustfs:1.0.0-beta.8
+    container_name: uncypher-rustfs
+    command: server /data --console-address ":9001"
+    environment:
+      RUSTFS_ROOT_USER: ${S3_ACCESS_KEY:-uncypher}
+      RUSTFS_ROOT_PASSWORD: ${S3_SECRET_KEY:-uncypher-rustfs-secret}
+    volumes:
+      - rustfs_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - uncypher-internal
+
+  # ===========================================
   # Backend Service
   # ===========================================
   backend:
@@ -158,14 +179,22 @@ services:
       # Optional shared secret gating the one-time /setup bootstrap endpoint.
       # Backend reads it as Optional[str]; empty/unset disables the gate.
       SETUP_SECRET: ${SETUP_SECRET:-}
+      # S3-compatible object store (RustFS) for chat attachment uploads.
+      # Must be reachable WITHOUT the egress proxy (see NO_PROXY above).
+      S3_ENDPOINT: http://uncypher-rustfs:9000
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-uncypher}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-uncypher-rustfs-secret}
+      S3_BUCKET: ${S3_BUCKET:-chat-attachments}
       # Egress proxy for GitHub OAuth
       HTTP_PROXY: http://uncypher-egress-proxy:3128
       HTTPS_PROXY: http://uncypher-egress-proxy:3128
-      NO_PROXY: kb-api,kb-postgres,kb-redis,kb-session-redis,kb-chroma,kb-elasticsearch,postgres,redis,uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
+      NO_PROXY: kb-api,kb-postgres,kb-redis,kb-session-redis,kb-chroma,kb-elasticsearch,postgres,redis,uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,uncypher-rustfs,rustfs,localhost,127.0.0.1
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      rustfs:
         condition: service_healthy
     volumes:
       - codebase_repo_data:/code:ro
@@ -174,6 +203,9 @@ services:
       # claude-runner. Without this, cleanup_oauth_configured() is False and the
       # endpoint returns "AI cleanup requires Claude Agent SDK OAuth on this server".
       - claude_credentials:/root/.claude
+      # Shared with chat-consumer: the upload endpoint writes attachments here and
+      # the agent (running in chat-consumer) reads them via this same named volume.
+      - chat_uploads:/uploads
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -207,7 +239,7 @@ services:
       # Egress proxy for BigQuery / external API OAuth
       HTTP_PROXY: http://uncypher-egress-proxy:3128
       HTTPS_PROXY: http://uncypher-egress-proxy:3128
-      NO_PROXY: kb-api,kb-postgres,kb-redis,kb-session-redis,kb-chroma,kb-elasticsearch,postgres,redis,uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
+      NO_PROXY: kb-api,kb-postgres,kb-redis,kb-session-redis,kb-chroma,kb-elasticsearch,postgres,redis,uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,uncypher-rustfs,rustfs,localhost,127.0.0.1
     depends_on:
       postgres:
         condition: service_healthy
@@ -268,6 +300,12 @@ services:
       REDIS_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}uncypher-redis:6379
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENAI_AGENT_MODEL: ${OPENAI_AGENT_MODEL:-gpt-4o}
+      # S3-compatible object store (RustFS) — agent re-reads uploaded attachments.
+      # Must bypass the egress proxy (see NO_PROXY above).
+      S3_ENDPOINT: http://uncypher-rustfs:9000
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-uncypher}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-uncypher-rustfs-secret}
+      S3_BUCKET: ${S3_BUCKET:-chat-attachments}
       # Same secret as backend + kb-api so kb-tokens minted here verify.
       JWT_SECRET_KEY: ${JWT_SECRET_KEY}
       JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
@@ -284,10 +322,12 @@ services:
       # Egress proxy for OpenAI API
       HTTP_PROXY: http://uncypher-egress-proxy:3128
       HTTPS_PROXY: http://uncypher-egress-proxy:3128
-      NO_PROXY: kb-api,kb-postgres,kb-redis,kb-session-redis,kb-chroma,kb-elasticsearch,postgres,redis,uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
+      NO_PROXY: kb-api,kb-postgres,kb-redis,kb-session-redis,kb-chroma,kb-elasticsearch,postgres,redis,uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,uncypher-rustfs,rustfs,localhost,127.0.0.1
     volumes:
       - codebase_repo_data:/code:ro
       - claude_credentials:/root/.claude
+      # Shared with backend: agent reads uploaded attachments from here.
+      - chat_uploads:/uploads
     depends_on:
       postgres:
         condition: service_healthy
@@ -534,7 +574,7 @@ services:
       # Egress proxy for git clone
       HTTP_PROXY: http://uncypher-egress-proxy:3128
       HTTPS_PROXY: http://uncypher-egress-proxy:3128
-      NO_PROXY: kb-api,kb-postgres,kb-redis,kb-session-redis,kb-chroma,kb-elasticsearch,postgres,redis,uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-claude-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
+      NO_PROXY: kb-api,kb-postgres,kb-redis,kb-session-redis,kb-chroma,kb-elasticsearch,postgres,redis,uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-claude-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,uncypher-rustfs,rustfs,localhost,127.0.0.1
     command: uvicorn app:app --host 0.0.0.0 --port 8000
     depends_on:
       codebase-codex-runner:
@@ -569,7 +609,7 @@ services:
       # Egress proxy for OpenAI CLI
       HTTP_PROXY: http://uncypher-egress-proxy:3128
       HTTPS_PROXY: http://uncypher-egress-proxy:3128
-      NO_PROXY: kb-api,kb-postgres,kb-redis,kb-session-redis,kb-chroma,kb-elasticsearch,postgres,redis,uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-claude-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
+      NO_PROXY: kb-api,kb-postgres,kb-redis,kb-session-redis,kb-chroma,kb-elasticsearch,postgres,redis,uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-claude-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,uncypher-rustfs,rustfs,localhost,127.0.0.1
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:9100/health"]
       interval: 30s
@@ -591,7 +631,7 @@ services:
       # Egress proxy for Anthropic CLI
       HTTP_PROXY: http://uncypher-egress-proxy:3128
       HTTPS_PROXY: http://uncypher-egress-proxy:3128
-      NO_PROXY: kb-api,kb-postgres,kb-redis,kb-session-redis,kb-chroma,kb-elasticsearch,postgres,redis,uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-claude-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,localhost,127.0.0.1
+      NO_PROXY: kb-api,kb-postgres,kb-redis,kb-session-redis,kb-chroma,kb-elasticsearch,postgres,redis,uncypher-postgres,uncypher-redis,uncypher-backend,uncypher-frontend,uncypher-kb-api,uncypher-kb-postgres,uncypher-kb-redis,uncypher-kb-session-redis,uncypher-codebase-backend,uncypher-codex-runner,uncypher-claude-runner,uncypher-celery-worker,uncypher-celery-beat,uncypher-chat-consumer,uncypher-egress-proxy,uncypher-traefik,uncypher-rustfs,rustfs,localhost,127.0.0.1
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:9000/health"]
       interval: 30s
@@ -631,6 +671,8 @@ volumes:
   egress_logs:
   postgres_data:
   redis_data:
+  rustfs_data:
+  chat_uploads:
   kb_postgres_data:
   kb_redis_data:
   kb_session_data:
