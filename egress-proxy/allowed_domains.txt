@@ -32,6 +32,9 @@
 # Google Cloud (BigQuery)
 .googleapis.com
 
+# Slack incoming webhooks (ops alerts for Claude auth/quota failures)
+.hooks.slack.com
+
 # Let's Encrypt (when TLS_MODE=letsencrypt)
 .letsencrypt.org
 .api.letsencrypt.org

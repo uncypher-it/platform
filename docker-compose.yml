@@ -319,6 +319,9 @@ services:
       ORG_CODEBASE_CONTEXT: ${ORG_CODEBASE_CONTEXT:-}
       ORG_DATABASE_CONTEXT: ${ORG_DATABASE_CONTEXT:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Ops alerts (Slack-compatible webhook) for Claude auth/quota failures seen by chat runs.
+      OPS_ALERT_WEBHOOK_URL: ${OPS_ALERT_WEBHOOK_URL:-}
+      OPS_ALERT_DEPLOYMENT_NAME: ${OPS_ALERT_DEPLOYMENT_NAME:-}
       # Egress proxy for OpenAI API
       HTTP_PROXY: http://uncypher-egress-proxy:3128
       HTTPS_PROXY: http://uncypher-egress-proxy:3128

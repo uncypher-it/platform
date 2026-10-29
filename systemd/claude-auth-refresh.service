@@ -15,6 +15,9 @@ Environment=COMPOSE_PROJECT_NAME=uncypher
 Environment=COMPOSE_DIR=/home/DEPLOY_USER/uncypher
 Environment=HOME=/home/DEPLOY_USER
 Environment=PATH=/home/DEPLOY_USER/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Alert webhook, deployment name, CLI path, optional log file. Optional (the
+# leading '-'); copy claude-auth/refresh.env.example. Overrides the lines above.
+EnvironmentFile=-/home/DEPLOY_USER/uncypher/claude-auth/refresh.env
 ExecStart=/home/DEPLOY_USER/uncypher/scripts/claude-oauth-refresh-daemon.sh
 Restart=always
 RestartSec=60
