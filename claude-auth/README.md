@@ -3,12 +3,11 @@
 Several Uncypher services authenticate to Claude with **OAuth credentials** from
 a Claude subscription, not a static API key: the chat agent (`chat-consumer`),
 KB cleanup and bulk generation (`backend`, `celery-worker`), and the codebase
-`claude-runner`. One host daemon keeps those credentials alive and **alerts when
-it can't**:
+`claude-runner`. One host daemon keeps those credentials alive and **says so
+loudly when it can't**:
 
 - daemon: [`../scripts/claude-oauth-refresh-daemon.sh`](../scripts/claude-oauth-refresh-daemon.sh)
 - systemd unit: [`../systemd/claude-auth-refresh.service`](../systemd/claude-auth-refresh.service)
-- settings: `refresh.env` (copy [`refresh.env.example`](refresh.env.example); gitignored)
 
 ---
 
@@ -23,8 +22,10 @@ and **the only fix is a human running `claude login` on the host**.
 
 The 10-21 death took chat down for 8 days because nothing said so: the old
 daemon retried every 60 s, logged ~1,400 failures a day, and systemd still
-showed `active (running)`. Now the daemon sends an alert within a minute and
-again every 6 h until someone logs in. **Configure the webhook on every host.**
+showed `active (running)`. Now the daemon logs one `ALERT` line within a minute,
+stops hammering, and writes a machine-readable state file every wake (see
+[Alerts and the state file](#alerts-and-the-state-file)). Delivering alerts
+(Slack, paging) and exporting the state as telemetry are a follow-up.
 
 ---
 
@@ -61,8 +62,8 @@ Each wake, the daemon:
    root-owned file.
 5. **Verify** that the config copy now matches the host `expiresAt`. A mismatch
    or a failed volume sync is `sync_failed`.
-6. **Alert** on state changes, persist state in `~/.claude/claude-auth-refresh.state`,
-   log one line, sleep.
+6. **Report:** log `ALERT`/`RESOLVED` on state changes, rewrite the state file,
+   log one status line, sleep.
 
 While the chain is dead it does not hammer: it wakes every 60 s but calls the
 CLI again only when the host credentials change (someone ran `claude login`) or
@@ -74,54 +75,59 @@ CLI again only when the host credentials change (someone ran `claude login`) or
 
 ---
 
-## Alerts
+## Alerts and the state file
 
-Alerts go to any Slack-compatible incoming webhook (`POST {"text": "..."}`).
-They name the deployment, say what is broken, since when, the CLI's error line
-and the fix. They never contain tokens.
-
-| Alert | Meaning | Fix |
-|-------|---------|-----|
-| `auth_dead` | The refresh chain is dead (the monthly event), or the host has no credentials. | `ssh` to the host and run `claude login` as the deploy user. The daemon notices within a minute and sends a recovery alert. |
-| `quota` | The subscription hit its weekly or session limit (`You've hit your weekly limit · resets …`). | Wait for the reset in the message. If it's unexpected, check who else uses the subscription. Re-checked every 30 min. |
-| `access_disabled` | The account's organization disabled Claude Code subscription access. | `claude login` with a different account that has Claude Code enabled. Logging in again with the same account won't help. |
-| `sync_failed` | The host refreshed but a container copy didn't update. Chat fails when the containers' token expires. | Check `journalctl -u claude-auth-refresh` and `docker compose ps`. Retried every 2 min. |
-| `error` | An unrecognised CLI failure, 3 times in a row. | Read the journal; run `claude --print ok` as the deploy user by hand. |
-| `[RESOLVED]` | Back to `ok`, with the outage duration. | — |
-
-Alerts fire as soon as a failure state starts (`error` waits for 3 in a row),
-repeat every `ALERT_REPEAT_SECONDS` (6 h) while it lasts, and resolve once. With
-no webhook configured, the daemon warns at startup and logs each alert as an
-`ALERT …` line instead. A failed POST is logged and retried on the next wake;
-it never stops the daemon.
-
-**Set up and test** (as the deploy user, from the compose dir):
+**Log lines.** Entering a failing state logs exactly one `ALERT <status>: …`
+line: what is broken, since when, the CLI's error line and the fix. Recovery
+logs exactly one `RESOLVED <status>: …` line with the outage duration. Nothing
+repeats in between; the per-wake status line (`status=auth_dead …`) shows the
+state every wake. `auth_dead`, `access_disabled`, `quota` and `sync_failed`
+alert immediately; an unknown `error` alerts after 3 in a row. Switching from
+one failing state to another (say `access_disabled` to `quota`) logs a new
+`ALERT`. No line ever contains a token.
 
 ```bash
-cp claude-auth/refresh.env.example claude-auth/refresh.env
-# set ALERT_WEBHOOK_URL, ALERT_DEPLOYMENT_NAME (e.g. superk-prod), fix DEPLOY_USER
-(set -a; . claude-auth/refresh.env; CLAUDE_REFRESH_ALERT_TEST=1 scripts/claude-oauth-refresh-daemon.sh)
-sudo systemctl restart claude-auth-refresh.service
+journalctl -u claude-auth-refresh | grep -E 'ALERT|RESOLVED'
 ```
 
-The test sends one `[TEST]` message and exits 0. It exits 1 if the POST failed
-and 2 if no webhook is set.
+```
+[2026-10-21T04:05:12Z] ALERT auth_dead: Claude chat is failing for every user: the Claude login on the host has expired and cannot be refreshed. Since: 2026-10-21T04:05:12Z. Error: Failed to authenticate: OAuth session expired and could not be refreshed. Fix: ssh to the host and run `claude login` as ec2-user; the daemon picks it up within a minute.
+[2026-10-29T10:02:40Z] RESOLVED auth_dead: Claude chat is working again after 8d 5h (failing since 2026-10-21T04:05:12Z).
+```
 
-The backend also alerts on auth/quota failures seen by chat runs. It reads
-`OPS_ALERT_WEBHOOK_URL` / `OPS_ALERT_DEPLOYMENT_NAME` from `.env` (passed to
-`chat-consumer` in `docker-compose.yml`) and posts through the egress proxy,
-which allows `.hooks.slack.com`.
+| Status | Meaning | Fix |
+|--------|---------|-----|
+| `auth_dead` | The refresh chain is dead (the monthly event), or the host has no credentials. | `ssh` to the host and run `claude login` as the deploy user. The daemon notices within a minute and logs `RESOLVED`. |
+| `quota` | The subscription hit its weekly or session limit (`You've hit your weekly limit · resets …`). | Wait for the reset in the message. If it's unexpected, check who else uses the subscription. Re-checked every 30 min. |
+| `access_disabled` | The account's organization disabled Claude Code subscription access. | `claude login` with a different account that has Claude Code enabled. Logging in again with the same account won't help. |
+| `sync_failed` | The host refreshed but a container copy didn't update. Chat fails when the containers' token expires. | Check the journal and `docker compose ps`. Retried every 2 min. |
+| `error` | An unrecognised CLI failure, 3 times in a row. | Read the journal; run `claude --print ok` as the deploy user by hand. |
+
+**State file.** `~/.claude/claude-auth-refresh.state` (dir set by
+`CLAUDE_REFRESH_STATE_DIR`) is rewritten atomically every wake (temp file +
+rename), as `key=value` lines, mode 0600, owned by the deploy user. **This is
+what a future telemetry collector reads.** Parse it, never `source` it; the
+daemon doesn't either.
+
+| Key | Meaning |
+|-----|---------|
+| `status` | This wake's status: `ok`, `auth_dead`, `quota`, `access_disabled`, `sync_failed` or `error`. `error` shows up here before its `ALERT` (which waits for 3 in a row). |
+| `checked_at` | Epoch seconds of this wake. More than ~1 h old (the longest sleep) means the daemon isn't running. |
+| `host_expires_at` | Host `expiresAt` in epoch ms. `0` = the CLI wiped a dead chain; `-1` = file missing or unreadable. |
+| `outage_since` | Epoch seconds the current outage began (`0` = none). |
+| `alerted` | Status of the outstanding `ALERT` (empty = none). |
+| `cli_status`, `detail`, `error_streak`, `dead_fp`, `last_probe`, `volume_exp` | Daemon bookkeeping. `dead_fp` is a 12-hex sha256 prefix of the refresh token, never the token. |
 
 ---
 
 ## One-time setup per VM
 
 1. **Install the Claude CLI on the host** (as the deploy user):
-   `curl -fsSL https://claude.ai/install.sh | bash`
+   `curl -fsSL https://claude.ai/install.sh | bash`. The unit's `PATH` already
+   includes `~/.local/bin`.
 2. **Log in interactively, on the host, as the deploy user:** `claude login`.
    Then check: `test -s ~/.claude/.credentials.json && echo ok`.
-3. **Configure** `claude-auth/refresh.env` and test the webhook (above).
-4. **Install the unit.** Replace every `DEPLOY_USER` in
+3. **Install the unit.** Replace every `DEPLOY_USER` in
    `systemd/claude-auth-refresh.service` and fix the paths if the compose dir
    isn't `~/uncypher`, then:
 
@@ -144,8 +150,7 @@ hand-written unit with the same name. Replace it:
 sudo systemctl stop claude-auth-refresh.service
 sudo systemctl disable claude-auth-refresh.service
 sudo cp /etc/systemd/system/claude-auth-refresh.service ~/claude-auth-refresh.service.old
-cd ~/uncypher && git pull --ff-only          # if this is a checkout of this repo; else copy scripts/, systemd/, claude-auth/
-cp claude-auth/refresh.env.example claude-auth/refresh.env   # fill in; test the webhook
+cd ~/uncypher && git pull --ff-only          # if this is a checkout of this repo; else copy scripts/ and systemd/
 sed 's/DEPLOY_USER/ec2-user/g' systemd/claude-auth-refresh.service | sudo tee /etc/systemd/system/claude-auth-refresh.service >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable --now claude-auth-refresh.service
@@ -162,16 +167,13 @@ no longer written unless you set `CLAUDE_REFRESH_LOG_FILE`.
 
 ## Configuration
 
-Set in `refresh.env` or in the unit. All optional; defaults shown.
+Set with `Environment=` lines in the unit. All optional; defaults shown.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `ALERT_WEBHOOK_URL` | _(empty)_ | Slack-compatible incoming webhook. Empty means alerts are only logged. |
-| `ALERT_DEPLOYMENT_NAME` | hostname | Name shown in alerts. |
-| `ALERT_REPEAT_SECONDS` | `21600` | Repeat interval while a failure lasts. |
 | `COMPOSE_DIR` | `$HOME/uncypher` | Directory containing `docker-compose.yml`. The volume sync runs from here. |
 | `CLAUDE_HOME` | `$HOME/.claude` | Host credentials dir. Must be the dir the CLI uses. |
-| `CLAUDE_CLI` | `claude` | Host Claude CLI (name or absolute path). |
+| `CLAUDE_CLI` | `claude` | Host Claude CLI (name or absolute path), found via the unit's `PATH`. |
 | `CLAUDE_CONFIG_SYNC_DIR` | `$COMPOSE_DIR/claude-config` | chat-consumer's bind-mounted config dir. Skipped when it doesn't exist. |
 | `CLAUDE_CONSUMER_CONTAINER` | `uncypher-chat-consumer` | Container used to read a root-owned config copy. |
 | `CLAUDE_REFRESH_STATE_DIR` | `$CLAUDE_HOME` | Where `claude-auth-refresh.state` lives. |
@@ -185,10 +187,9 @@ Set in `refresh.env` or in the unit. All optional; defaults shown.
 | `CLAUDE_CLI_TIMEOUT_SECONDS` | `300` | Kill a hung CLI call (needs `timeout`, standard on Linux). |
 | `CLAUDE_SKIP_HOST_REFRESH` | `0` | `1` = never call the CLI; only sync the existing host credentials. |
 | `CLAUDE_REFRESH_ONCE` | `0` | `1` = run one wake and exit (0 when ok). |
-| `CLAUDE_REFRESH_ALERT_TEST` | `0` | `1` = send one test alert and exit. |
 
-Tests: `bash tests/claude-auth/test_refresh_daemon.sh` (stubs `claude`, `docker`
-and `curl`; runs on macOS bash 3.2 and Linux bash 5).
+Tests: `bash tests/claude-auth/test_refresh_daemon.sh` (stubs `claude` and
+`docker`; runs on macOS bash 3.2 and Linux bash 5).
 
 ---
 
@@ -209,11 +210,10 @@ no daemon, but it bills the API console instead of the subscription.
 
 | Symptom | Likely cause / fix |
 |---------|--------------------|
-| `auth_dead` alert, or chat says `Failed to authenticate` / `API Error: 401` | The chain died (expect it monthly). Run `claude login` on the host as the deploy user; a `[RESOLVED]` alert follows within a minute. |
+| `ALERT auth_dead`, or chat says `Failed to authenticate` / `API Error: 401` | The chain died (expect it monthly). Run `claude login` on the host as the deploy user; a `RESOLVED` line follows within a minute. |
 | `cli=skip:no-host-tokens` every minute | Same: the CLI dropped the dead tokens from `~/.claude/.credentials.json`. Log in. |
-| No alerts at all, ever | `ALERT_WEBHOOK_URL` unset (see the startup `WARN`), or `refresh.env` isn't where `EnvironmentFile=` points. Run the alert test. |
-| `alert delivery failed (curl rc=…)` | Webhook URL wrong or revoked, or the host can't reach Slack. The daemon retries every wake. |
+| State file `checked_at` is stale | The daemon isn't running. `systemctl status claude-auth-refresh`; read the journal for the crash. |
 | `cfg=unreadable` | The config copy is root-owned and `docker exec` failed (consumer down?). The daemon still replaces the file; check `docker ps`. |
-| `sync_failed: volume sync failed: …` | `docker compose run backend` failed: wrong `COMPOSE_DIR`, Docker down, or the deploy user isn't in the `docker` group. |
+| `ALERT sync_failed: … volume sync failed: …` | `docker compose run backend` failed: wrong `COMPOSE_DIR`, Docker down, or the deploy user isn't in the `docker` group. |
 | Daemon refreshes but containers still 401 | A container cached an old token. `docker compose restart chat-consumer backend celery-worker codebase-claude-runner`. |
 | Two refreshers fighting (log lines from both) | The old hand-installed unit or script is still running. See the migration steps. |

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Keep the host's Claude OAuth chain alive, copy fresh credentials to the
-# containers, and alert (Slack-compatible webhook) when the chain dies, the
-# subscription hits a limit, or the copies drift. Design and runbook:
-# claude-auth/README.md.
+# containers, and say so loudly when the chain dies, the subscription hits a
+# limit, or the copies drift: one ALERT log line on entering a failing state,
+# one RESOLVED line on recovery, and a machine-readable state file every wake.
+# Design and runbook: claude-auth/README.md.
 #
 # A host holds up to three copies of the credentials:
 #   host     $CLAUDE_HOME/.credentials.json  the chain owner; `claude login` writes it
@@ -18,7 +19,8 @@
 #      ok | auth_dead | quota | access_disabled | error
 #   3. copy the host credentials to every older copy, but only when they are valid
 #      (decided by the credentials themselves, not by the CLI's exit code)
-#   4. verify the config copy, alert on state changes, sleep
+#   4. verify the config copy, log ALERT/RESOLVED on state changes, write the
+#      state file, sleep
 #
 # Portable to macOS /bin/bash 3.2 (the tests) and Linux bash 5 (the target):
 # no associative arrays, no GNU-only date flags; time and JSON go through python3.
@@ -53,9 +55,6 @@ load_config() {
   SKIP_HOST_REFRESH="${CLAUDE_SKIP_HOST_REFRESH:-0}"
   RUN_ONCE="${CLAUDE_REFRESH_ONCE:-0}"
 
-  ALERT_WEBHOOK_URL="${ALERT_WEBHOOK_URL:-}"
-  ALERT_DEPLOYMENT_NAME="${ALERT_DEPLOYMENT_NAME:-$(uname -n 2>/dev/null || echo unknown-host)}"
-  ALERT_REPEAT_SECONDS="${ALERT_REPEAT_SECONDS:-21600}"
   # Unrecognised errors are often transient; alert only after this many in a row.
   ERROR_ALERT_AFTER=3
 
@@ -106,7 +105,7 @@ int_or() {
   esac
 }
 
-# python3 helper: credential parsing, CLI-output classification, JSON payloads.
+# python3 helper: credential parsing and CLI-output classification.
 # Run isolated (-I) so a stray json.py in the working directory is never imported.
 IFS= read -r -d '' PY_HELPER <<'PY' || true
 import hashlib, json, re, sys, time
@@ -167,8 +166,6 @@ if cmd == "cred":
     cred(sys.argv[2])
 elif cmd == "classify":
     classify(int(sys.argv[2]))
-elif cmd == "payload":
-    print(json.dumps({"text": sys.stdin.read()}))
 elif cmd == "iso":
     print(iso(int(sys.argv[2])))
 PY
@@ -192,14 +189,20 @@ last_line_of() {
 
 # ---------------------------------------------------------------------------
 # State (small key=value file; parsed, never sourced)
+#
+# Rewritten atomically every wake; it is also the machine-readable status a
+# future telemetry collector reads. Output-only keys (written, never read back):
+#   status           this wake's status: ok | auth_dead | quota | access_disabled
+#                    | sync_failed | error
+#   checked_at       epoch seconds of this wake
+#   host_expires_at  host expiresAt in epoch ms (-1 missing/unreadable, 0 dead)
 # ---------------------------------------------------------------------------
 
 state_load() {
   ST_CLI_STATUS=ok      # last CLI classification, carried forward between calls
   ST_DETAIL=""          # its one-line message
   ST_OUTAGE_SINCE=0     # epoch of the first failing wake of the current outage
-  ST_ALERTED=""         # status we last alerted for ("" = nothing outstanding)
-  ST_LAST_ALERT=0
+  ST_ALERTED=""         # status of the outstanding ALERT line ("" = none)
   ST_ERROR_STREAK=0
   ST_DEAD_FP=""         # fingerprint of the credentials that died
   ST_LAST_PROBE=0       # epoch of the last CLI call
@@ -212,7 +215,6 @@ state_load() {
       detail) ST_DETAIL="$value" ;;
       outage_since) ST_OUTAGE_SINCE="$(int_or "$value" 0)" ;;
       alerted) ST_ALERTED="$value" ;;
-      last_alert) ST_LAST_ALERT="$(int_or "$value" 0)" ;;
       error_streak) ST_ERROR_STREAK="$(int_or "$value" 0)" ;;
       dead_fp) ST_DEAD_FP="$value" ;;
       last_probe) ST_LAST_PROBE="$(int_or "$value" 0)" ;;
@@ -224,11 +226,13 @@ state_load() {
 state_save() {
   local tmp="$STATE_FILE.tmp.$$"
   {
+    printf 'status=%s\n' "$WAKE_STATUS"
+    printf 'checked_at=%s\n' "$NOW"
+    printf 'host_expires_at=%s\n' "$HOST_EXP"
     printf 'cli_status=%s\n' "$ST_CLI_STATUS"
     printf 'detail=%s\n' "$ST_DETAIL"
     printf 'outage_since=%s\n' "$ST_OUTAGE_SINCE"
     printf 'alerted=%s\n' "$ST_ALERTED"
-    printf 'last_alert=%s\n' "$ST_LAST_ALERT"
     printf 'error_streak=%s\n' "$ST_ERROR_STREAK"
     printf 'dead_fp=%s\n' "$ST_DEAD_FP"
     printf 'last_probe=%s\n' "$ST_LAST_PROBE"
@@ -382,111 +386,61 @@ run_cli() {
 }
 
 # ---------------------------------------------------------------------------
-# Alerts
+# Alerts (log lines; delivery and telemetry export are a follow-up)
 # ---------------------------------------------------------------------------
 
-# POST {"text": ...} to the webhook, or log it when no webhook is configured.
-# Never fatal; returns 1 when delivery failed so the caller retries next wake.
-send_alert() {
-  local text="$1" flat payload="$STATE_DIR/.alert-payload.tmp" err rc=0 nl='
-'
-  flat="${text//$nl/ | }"
-  if [ -z "$ALERT_WEBHOOK_URL" ]; then
-    log "ALERT $flat"
-    return 0
-  fi
-  if ! printf '%s' "$text" | py payload >"$payload" 2>/dev/null; then
-    log "alert not sent (could not build JSON): $flat"
-    rm -f "$payload"
-    return 1
-  fi
-  # The URL goes in via curl's config on stdin so it never shows up in ps.
-  err="$(printf 'url = "%s"\n' "$ALERT_WEBHOOK_URL" |
-    curl -fsS -m 10 -K - -H 'Content-Type: application/json' --data-binary "@$payload" 2>&1 >/dev/null)" || rc=$?
-  rm -f "$payload"
-  if [ "$rc" -ne 0 ]; then
-    log "alert delivery failed (curl rc=$rc: $(printf '%s' "$err" | head -n 1 | cut -c1-200)); will retry: $flat"
-    return 1
-  fi
-  log "alert sent: $flat"
-  return 0
-}
-
+# One line in plain words: what is broken, since when, the CLI's error, the fix.
 problem_text() {
-  local status="$1" detail="$2" phase="$3" name="$ALERT_DEPLOYMENT_NAME" head cause fix tag="[ALERT]"
-  head="Claude chat is failing for every user on $name."
+  local status="$1" detail="$2" head="Claude chat is failing for every user" cause fix
   case "$status" in
     auth_dead)
-      cause="the Claude login on the host has expired and cannot be refreshed (auth_dead)."
-      fix="ssh to the host and run \`claude login\` as $DAEMON_USER; the daemon picks it up within a minute."
+      cause="the Claude login on the host has expired and cannot be refreshed"
+      fix="ssh to the host and run \`claude login\` as $DAEMON_USER; the daemon picks it up within a minute"
       ;;
     quota)
-      cause="the Claude subscription has hit its usage limit (quota)."
-      fix="wait for the reset time shown in the error; a recovery alert follows when it clears. If the limit is unexpected, check who else uses this Claude subscription."
+      cause="the Claude subscription has hit its usage limit"
+      fix="wait for the reset time shown in the error (a RESOLVED line follows when it clears); if the limit is unexpected, check who else uses this Claude subscription"
       ;;
     access_disabled)
-      cause="the logged-in account's organization has disabled Claude Code subscription access (access_disabled)."
-      fix="ssh to the host and run \`claude login\` as $DAEMON_USER with an account that has Claude Code enabled; logging in again with the same account will not help."
+      cause="the logged-in account's organization has disabled Claude Code subscription access"
+      fix="ssh to the host and run \`claude login\` as $DAEMON_USER with an account that has Claude Code enabled; logging in again with the same account will not help"
       ;;
     sync_failed)
-      head="Claude chat on $name will start failing for every user."
-      cause="fresh credentials were refreshed on the host but did not reach the containers (sync_failed)."
-      fix="check \`journalctl -u claude-auth-refresh\` and \`docker compose ps\` on the host; the daemon retries every ${FAIL_SLEEP_SECONDS}s."
+      head="Claude chat will start failing for every user"
+      cause="fresh credentials were refreshed on the host but did not reach the containers"
+      fix="check \`docker compose ps\` and this log on the host; the daemon retries every ${FAIL_SLEEP_SECONDS}s"
       ;;
     *)
-      head="Claude chat may be failing for every user on $name."
-      cause="the Claude auth refresh failed $ST_ERROR_STREAK times in a row with an unrecognised error (error)."
-      fix="check \`journalctl -u claude-auth-refresh\` on the host and run \`claude --print ok\` as $DAEMON_USER by hand."
+      head="Claude chat may be failing for every user"
+      cause="the Claude auth refresh failed $ST_ERROR_STREAK times in a row with an unrecognised error"
+      fix="read this log and run \`claude --print ok\` as $DAEMON_USER by hand"
       ;;
   esac
-  if [ "$phase" = repeat ]; then tag="[STILL FAILING]"; fi
-  printf '%s %s: %s\nCause: %s\nSince: %s (%s ago)\nError: %s\nFix: %s' \
-    "$tag" "$name" "$head" "$cause" "$(iso_of "$ST_OUTAGE_SINCE")" \
-    "$(fmt_duration $((NOW - ST_OUTAGE_SINCE)))" "${detail:-(none)}" "$fix"
+  printf 'ALERT %s: %s: %s. Since: %s. Error: %s. Fix: %s.' \
+    "$status" "$head" "$cause" "$(iso_of "$ST_OUTAGE_SINCE")" "${detail:-(none)}" "$fix"
 }
 
 recovery_text() {
-  printf '[RESOLVED] %s: Claude chat is working again on %s.\nWas: %s since %s; the outage lasted %s.' \
-    "$ALERT_DEPLOYMENT_NAME" "$ALERT_DEPLOYMENT_NAME" "$ST_ALERTED" \
-    "$(iso_of "$ST_OUTAGE_SINCE")" "$(fmt_duration $((NOW - ST_OUTAGE_SINCE)))"
+  printf 'RESOLVED %s: Claude chat is working again after %s (failing since %s).' \
+    "$ST_ALERTED" "$(fmt_duration $((NOW - ST_OUTAGE_SINCE)))" "$(iso_of "$ST_OUTAGE_SINCE")"
 }
 
-# Alert on entering a failing state, repeat while it lasts, and send one
-# recovery alert. Unknown errors alert only after ERROR_ALERT_AFTER in a row.
+# One ALERT line on entering a failing state (or switching to another one), one
+# RESOLVED line on recovery; the per-wake status line covers everything between.
+# Unknown errors count only after ERROR_ALERT_AFTER in a row.
 process_alerts() {
   local status="$1" detail="$2"
   if [ "$status" = ok ]; then
-    if [ -z "$ST_ALERTED" ]; then
-      ST_OUTAGE_SINCE=0
-    elif send_alert "$(recovery_text)"; then
-      ST_ALERTED="" ST_OUTAGE_SINCE=0 ST_LAST_ALERT=0
-    fi
+    if [ -n "$ST_ALERTED" ]; then log "$(recovery_text)"; fi
+    ST_ALERTED="" ST_OUTAGE_SINCE=0
     return 0
   fi
   if [ "$ST_OUTAGE_SINCE" -eq 0 ]; then ST_OUTAGE_SINCE="$NOW"; fi
   if [ "$status" = error ] && [ "$ST_ERROR_STREAK" -lt "$ERROR_ALERT_AFTER" ]; then return 0; fi
   if [ "$ST_ALERTED" != "$status" ]; then
-    if send_alert "$(problem_text "$status" "$detail" new)"; then
-      ST_ALERTED="$status" ST_LAST_ALERT="$NOW"
-    fi
-  elif [ $((NOW - ST_LAST_ALERT)) -ge "$ALERT_REPEAT_SECONDS" ]; then
-    if send_alert "$(problem_text "$status" "$detail" repeat)"; then
-      ST_LAST_ALERT="$NOW"
-    fi
+    log "$(problem_text "$status" "$detail")"
+    ST_ALERTED="$status"
   fi
-}
-
-send_test_alert() {
-  local text
-  text="$(printf '[TEST] %s: Claude auth alerting works. No action needed.\nSent by claude-oauth-refresh-daemon.sh as %s.' \
-    "$ALERT_DEPLOYMENT_NAME" "$DAEMON_USER")"
-  if [ -z "$ALERT_WEBHOOK_URL" ]; then
-    send_alert "$text"
-    log "ALERT_WEBHOOK_URL is not set; nothing was sent"
-    return 2
-  fi
-  if send_alert "$text"; then return 0; fi
-  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -605,9 +559,8 @@ run_wake() {
   fi
   process_alerts "$status" "$alert_detail"
 
-  ST_CLI_STATUS="$cli_status" ST_DETAIL="$cli_detail"
+  ST_CLI_STATUS="$cli_status" ST_DETAIL="$cli_detail" WAKE_STATUS="$status"
   NEXT_SLEEP="$(next_sleep_seconds "$status")"
-  WAKE_STATUS="$status"
   state_save
   rm -f "$STATE_DIR/.claude-config-read.tmp"
   local err_note=""
@@ -617,7 +570,7 @@ run_wake() {
 
 cleanup_temp_files() {
   rm -f "$STATE_DIR/.cli-output.tmp" "$STATE_DIR/.claude-config-read.tmp" \
-    "$STATE_DIR/.alert-payload.tmp" "$STATE_DIR/.compose-sync.out" 2>/dev/null || true
+    "$STATE_DIR/.compose-sync.out" 2>/dev/null || true
 }
 
 main() {
@@ -631,16 +584,7 @@ main() {
   trap cleanup_temp_files EXIT
   trap 'exit 143' TERM INT
 
-  if [ "${CLAUDE_REFRESH_ALERT_TEST:-0}" = 1 ]; then
-    local rc=0
-    send_test_alert || rc=$?
-    exit "$rc"
-  fi
-
-  if [ -z "$ALERT_WEBHOOK_URL" ]; then
-    log "WARN alerting is not configured (ALERT_WEBHOOK_URL is empty); alerts are only logged with an ALERT prefix"
-  fi
-  log "starting: deployment=$ALERT_DEPLOYMENT_NAME host_creds=$HOST_CREDENTIALS compose_dir=$COMPOSE_DIR claude_config=$CONFIG_SYNC_DIR window=${REFRESH_WINDOW_SECONDS}s"
+  log "starting: host_creds=$HOST_CREDENTIALS compose_dir=$COMPOSE_DIR claude_config=$CONFIG_SYNC_DIR window=${REFRESH_WINDOW_SECONDS}s"
 
   while true; do
     run_wake

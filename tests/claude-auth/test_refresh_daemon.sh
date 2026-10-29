@@ -6,8 +6,9 @@
 #
 # The daemon runs under the same bash as this runner ("$BASH"), one wake per
 # invocation (CLAUDE_REFRESH_ONCE=1) with a pinned clock (CLAUDE_REFRESH_NOW).
-# PATH stubs stand in for `claude`, `docker` and `curl`; they read their
-# scripted behaviour from, and record calls into, $STUB.
+# PATH stubs stand in for `claude` and `docker`; they read their scripted
+# behaviour from, and record calls into, $STUB. Alerts are log lines
+# (`ALERT ...` / `RESOLVED ...`), counted across all wakes in $T/all.log.
 
 set -u
 
@@ -35,8 +36,10 @@ assert_missing() { if [ -e "$1" ]; then bad "$2: $1 should not exist"; else ok; 
 
 count_lines() { if [ -f "$1" ]; then grep -c . "$1" | tr -d ' '; else echo 0; fi; }
 calls() { count_lines "$STUB/$1.calls"; }
-payloads() { count_lines "$STUB/webhook.payloads"; }
-last_payload() { tail -n 1 "$STUB/webhook.payloads" 2>/dev/null; }
+alerts() { grep -c '\] ALERT ' "$T/all.log" 2>/dev/null | tr -d ' '; }
+resolved() { grep -c '\] RESOLVED ' "$T/all.log" 2>/dev/null | tr -d ' '; }
+# state <key>: value from the daemon's key=value state file.
+state() { sed -n "s/^$1=//p" "$CLAUDE_HOME/claude-auth-refresh.state" 2>/dev/null; }
 field() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["claudeAiOauth"].get(sys.argv[2]))' "$1" "$2" 2>/dev/null; }
 
 # --- fixtures ---------------------------------------------------------------
@@ -88,26 +91,14 @@ case "$1" in
     mkdir -p "$STUB/volume" && cp "$src/.credentials.json" "$STUB/volume/.credentials.json" ;;
 esac
 EOF
-  cat >"$T/bin/curl" <<'EOF'
-#!/bin/bash
-cat >>"$STUB/curl.config"           # -K - : URL arrives on stdin
-data="" prev=""
-for a in "$@"; do if [ "$prev" = "--data-binary" ]; then data="${a#@}"; fi; prev="$a"; done
-echo "$*" >>"$STUB/curl.calls"
-cat "$data" >>"$STUB/webhook.payloads"; echo >>"$STUB/webhook.payloads"
-rc="$(cat "$STUB/curl.rc" 2>/dev/null || echo 0)"
-if [ "$rc" != 0 ]; then echo "curl: (22) The requested URL returned error: 404" >&2; fi
-exit "$rc"
-EOF
-  chmod +x "$T/bin/claude" "$T/bin/docker" "$T/bin/curl"
+  chmod +x "$T/bin/claude" "$T/bin/docker"
 
   export STUB PATH="$T/bin:$ORIG_PATH" HOME="$T/home"
   export CLAUDE_HOME="$T/home/.claude" COMPOSE_DIR="$T/compose" CLAUDE_CLI=claude
   export CLAUDE_REFRESH_ONCE=1 CLAUDE_REFRESH_NOW="$NOW0"
-  export ALERT_WEBHOOK_URL="https://hooks.example.test/services/T000/B000/XXXX"
-  export ALERT_DEPLOYMENT_NAME=testdeploy
-  unset CLAUDE_SKIP_HOST_REFRESH CLAUDE_REFRESH_LOG_FILE CLAUDE_REFRESH_ALERT_TEST \
-    CLAUDE_CONFIG_SYNC_DIR CLAUDE_REFRESH_STATE_DIR ALERT_REPEAT_SECONDS
+  unset CLAUDE_SKIP_HOST_REFRESH CLAUDE_REFRESH_LOG_FILE CLAUDE_CONFIG_SYNC_DIR \
+    CLAUDE_REFRESH_STATE_DIR
+  : >"$T/all.log"
 
   HOSTC="$CLAUDE_HOME/.credentials.json"
   CFGC="$COMPOSE_DIR/claude-config/.credentials.json"
@@ -126,10 +117,10 @@ run_at() {
   cat "$T/out.log" >>"$T/all.log"
 }
 
-# Secrets must never reach logs or alerts.
+# Secrets must never reach the log or the state file.
 assert_no_secrets() {
   assert_no_grep "$T/all.log" "sk-ant-" "no token in logs"
-  assert_no_grep "$STUB/webhook.payloads" "sk-ant-" "no token in alerts"
+  assert_no_grep "$CLAUDE_HOME/claude-auth-refresh.state" "sk-ant-" "no token in state"
 }
 
 # --- tests ------------------------------------------------------------------
@@ -147,15 +138,20 @@ test_healthy_refresh_syncs_both_copies() {
   assert_eq "$(field "$CFGC" refreshToken)" "sk-ant-ort01-REFRESH-rt2" "claude-config synced"
   assert_eq "$(stat -f %Lp "$CFGC" 2>/dev/null || stat -c %a "$CFGC")" 600 "claude-config mode"
   assert_grep "$STUB/docker.calls" "cwd=$COMPOSE_DIR" "compose ran from COMPOSE_DIR"
-  assert_eq "$(payloads)" 0 "no alert"
+  assert_eq "$(alerts)" 0 "no alert"
   assert_grep "$T/out.log" "status=ok cli=in-window:ok(rc=0)" "wake line"
   assert_eq "$(grep -c 'status=' "$T/out.log" | tr -d ' ')" 1 "one line per wake"
+  assert_eq "$(state status)" ok "state: status"
+  assert_eq "$(state checked_at)" "$NOW0" "state: checked_at"
+  assert_eq "$(state host_expires_at)" "$((NOW0 + H8))000" "state: host_expires_at"
   # Next wake, outside the window: no CLI call, nothing newer to sync.
   run_at 60
   assert_eq "$(calls claude)" 1 "no CLI call outside window"
   assert_eq "$(calls docker)" 1 "no second volume sync"
   assert_grep "$T/out.log" "cli=skip:outside-window" "skip reason"
   assert_grep "$T/out.log" "next=3600s" "sleep clamped to max"
+  assert_eq "$(state checked_at)" "$((NOW0 + 60))" "state rewritten every wake"
+  assert_eq "$(find "$CLAUDE_HOME" -name 'claude-auth-refresh.state.tmp.*' | wc -l | tr -d ' ')" 0 "no temp state left behind"
   assert_no_secrets
   teardown
 }
@@ -170,10 +166,10 @@ test_quota_still_syncs_rotated_creds() {
   assert_eq "$RC" 1 "exit code"
   assert_eq "$(field "$VOLC" refreshToken)" "sk-ant-ort01-REFRESH-rt2" "volume synced despite rc=1"
   assert_eq "$(field "$CFGC" refreshToken)" "sk-ant-ort01-REFRESH-rt2" "claude-config synced despite rc=1"
-  assert_eq "$(payloads)" 1 "one quota alert"
-  assert_grep "$STUB/webhook.payloads" "usage limit (quota)" "quota cause"
-  assert_grep "$STUB/webhook.payloads" "hit your weekly limit" "CLI line in alert"
-  assert_grep "$STUB/webhook.payloads" "testdeploy" "deployment name"
+  assert_eq "$(alerts)" 1 "one quota ALERT line"
+  assert_grep "$T/all.log" "ALERT quota: Claude chat is failing for every user: the Claude subscription has hit its usage limit" "quota cause"
+  assert_grep "$T/all.log" "Error: You've hit your weekly limit" "CLI line in alert"
+  assert_eq "$(state status)" quota "state: status"
   assert_grep "$T/out.log" "next=1800s" "quota re-probe cap"
   # Re-probe after 30 min: limit cleared -> recovery.
   cli 0 "ok"
@@ -181,8 +177,9 @@ test_quota_still_syncs_rotated_creds() {
   assert_eq "$(calls claude)" 1 "no CLI call before re-probe"
   run_at 1800
   assert_eq "$(calls claude)" 2 "re-probe called the CLI"
-  assert_eq "$(payloads)" 2 "recovery alert"
-  assert_grep "$STUB/webhook.payloads" "RESOLVED" "recovery text"
+  assert_eq "$(resolved)" 1 "one RESOLVED line"
+  assert_grep "$T/all.log" "RESOLVED quota: Claude chat is working again after 30m" "recovery text"
+  assert_eq "$(alerts)" 1 "no extra ALERT"
   assert_no_secrets
   teardown
 }
@@ -195,10 +192,12 @@ test_auth_dead_alerts_once_waits_for_login() {
   cli 1 "Failed to authenticate: OAuth session expired and could not be refreshed" "$T/dead"
   run_at 0
   assert_eq "$RC" 1 "exit code"
-  assert_eq "$(payloads)" 1 "alerted once"
-  assert_grep "$STUB/webhook.payloads" "Claude chat is failing for every user on testdeploy" "headline"
-  assert_grep "$STUB/webhook.payloads" "run \`claude login\` as $(id -un)" "fix"
-  assert_grep "$STUB/webhook.payloads" "OAuth session expired" "CLI line"
+  assert_eq "$(alerts)" 1 "one ALERT line"
+  assert_grep "$T/all.log" "ALERT auth_dead: Claude chat is failing for every user: the Claude login on the host has expired" "headline"
+  assert_grep "$T/all.log" "run \`claude login\` as $(id -un)" "fix"
+  assert_grep "$T/all.log" "Error: Failed to authenticate: OAuth session expired" "CLI line"
+  assert_eq "$(state status)" auth_dead "state: status"
+  assert_eq "$(state host_expires_at)" 0 "state: dead host expiresAt"
   assert_missing "$VOLC" "dead creds not synced to volume"
   assert_eq "$(field "$CFGC" refreshToken)" "sk-ant-ort01-REFRESH-rt1" "claude-config untouched"
   assert_grep "$T/out.log" "next=60s" "dead poll interval"
@@ -208,7 +207,8 @@ test_auth_dead_alerts_once_waits_for_login() {
   run_at 1900
   assert_eq "$(calls claude)" 1 "CLI not re-called while dead"
   assert_eq "$(field "$HOSTC" expiresAt)" 0 "dead chain not re-adopted from claude-config"
-  assert_eq "$(payloads)" 1 "no duplicate alert"
+  assert_eq "$(alerts)" 1 "no duplicate ALERT"
+  assert_eq "$(grep -c 'status=auth_dead' "$T/all.log" | tr -d ' ')" 4 "status line every wake"
   assert_grep "$T/out.log" "cli=skip:no-host-tokens" "skip reason"
   # Operator runs `claude login`.
   mkcreds "$HOSTC" $((NOW0 + 2000 + H8)) login1
@@ -216,8 +216,9 @@ test_auth_dead_alerts_once_waits_for_login() {
   run_at 2000
   assert_eq "$RC" 0 "exit code after login"
   assert_eq "$(calls claude)" 2 "login detected, CLI verified"
-  assert_eq "$(payloads)" 2 "recovery alert"
-  assert_grep "$STUB/webhook.payloads" "RESOLVED.*outage lasted 33m" "recovery with duration"
+  assert_eq "$(resolved)" 1 "one RESOLVED line"
+  assert_grep "$T/all.log" "RESOLVED auth_dead: Claude chat is working again after 33m (failing since 2033-05-18T03:33:20Z)" "recovery with duration"
+  assert_eq "$(state status)" ok "state: back to ok"
   assert_eq "$(field "$VOLC" refreshToken)" "sk-ant-ort01-REFRESH-login1" "volume synced after login"
   assert_eq "$(field "$CFGC" refreshToken)" "sk-ant-ort01-REFRESH-login1" "claude-config synced after login"
   assert_no_secrets
@@ -229,14 +230,14 @@ test_auth_dead_with_tokens_reprobes_after_30m() {
   mkcreds "$HOSTC" $((NOW0 - 10)) rt1           # expired, tokens still present
   cli 1 "Failed to authenticate. API Error: 401 Invalid authentication credentials"
   run_at 0
-  assert_eq "$(payloads)" 1 "alerted"
+  assert_eq "$(alerts)" 1 "alerted"
   run_at 60
   run_at 1799
   assert_eq "$(calls claude)" 1 "same fingerprint: no call"
   assert_grep "$T/out.log" "cli=skip:dead-until-login" "skip reason"
   run_at 1800
   assert_eq "$(calls claude)" 2 "re-probe after 30 min"
-  assert_eq "$(payloads)" 1 "still one alert"
+  assert_eq "$(alerts)" 1 "still one ALERT"
   teardown
 }
 
@@ -255,7 +256,7 @@ test_unreadable_config_copy_read_via_docker_exec() {
   assert_grep "$T/out.log" "adopted=claude-config(docker)" "adoption logged"
   assert_eq "$(calls claude)" 0 "no CLI call (fresh token)"
   assert_eq "$(field "$VOLC" refreshToken)" "sk-ant-ort01-REFRESH-rtc" "volume gets adopted chain"
-  assert_eq "$(payloads)" 0 "no alert"
+  assert_eq "$(alerts)" 0 "no alert"
   teardown
 
   setup unreadable_config_overwrite
@@ -267,7 +268,7 @@ test_unreadable_config_copy_read_via_docker_exec() {
   assert_eq "$RC" 0 "exit code"
   assert_grep "$T/all.log" "cfg=direct" "verified directly after replacing it"
   assert_eq "$(field "$CFGC" refreshToken)" "sk-ant-ort01-REFRESH-rt2" "replaced via temp + mv"
-  assert_eq "$(payloads)" 0 "no alert"
+  assert_eq "$(alerts)" 0 "no alert"
   # Same, but this time keep reading blind to check the log says so.
   mkcreds "$HOSTC" $((NOW0 + H8 + 10)) rt3
   chmod 000 "$CFGC"
@@ -296,27 +297,30 @@ test_invalid_host_creds_never_synced() {
   assert_eq "$(calls claude)" 0 "no CLI call without credentials"
   assert_missing "$STUB/docker.calls" "no sync, no docker exec"
   assert_grep "$T/out.log" "cfg=absent" "config dir absent"
-  assert_grep "$STUB/webhook.payloads" "auth_dead" "missing creds alert"
+  assert_grep "$T/all.log" "ALERT auth_dead" "missing creds alert"
+  assert_eq "$(state host_expires_at)" -1 "state: missing host creds"
   teardown
 }
 
-test_repeat_alert_timing() {
-  setup repeat_alert
-  export ALERT_REPEAT_SECONDS=21600
+test_no_repeat_alerts_and_transitions() {
+  setup no_repeats
   mkcreds "$HOSTC" $((NOW0 + 300)) rt1
   cli 1 "Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask your admin to enable access"
   run_at 0
-  assert_eq "$(payloads)" 1 "first alert"
-  assert_grep "$STUB/webhook.payloads" "access_disabled" "classified"
-  assert_grep "$STUB/webhook.payloads" "account that has Claude Code enabled" "fix"
+  assert_eq "$(alerts)" 1 "ALERT on entering access_disabled"
+  assert_grep "$T/all.log" "ALERT access_disabled: .*account that has Claude Code enabled" "fix"
   run_at 60
-  run_at 21599
-  assert_eq "$(payloads)" 1 "no repeat before ALERT_REPEAT_SECONDS"
   run_at 21600
-  assert_eq "$(payloads)" 2 "repeat alert"
-  assert_grep "$STUB/webhook.payloads" "STILL FAILING.*6h 0m ago" "repeat text"
-  run_at 21660
-  assert_eq "$(payloads)" 2 "no extra repeat"
+  run_at 43200
+  assert_eq "$(alerts)" 1 "no repeats while it lasts"
+  assert_eq "$(grep -c 'status=access_disabled' "$T/all.log" | tr -d ' ')" 4 "status line every wake"
+  # Someone logs in with another account that hits a quota: a new failing state.
+  mkcreds "$HOSTC" $((NOW0 + 43300)) rt2
+  cli 1 "You've hit your session limit · resets 2:30pm (UTC)"
+  run_at 43260
+  assert_eq "$(alerts)" 2 "ALERT on switching to quota"
+  assert_grep "$T/all.log" "ALERT quota:.*Since: 2033-05-18T03:33:20Z" "outage start kept"
+  assert_eq "$(resolved)" 0 "not resolved yet"
   teardown
 }
 
@@ -326,17 +330,19 @@ test_unknown_error_alerts_after_three() {
   cli 1 "Error: something unexpected happened"
   run_at 0
   run_at 120
-  assert_eq "$(payloads)" 0 "no alert after 2 errors"
+  assert_eq "$(alerts)" 0 "no alert after 2 errors"
+  assert_eq "$(state status)" error "state shows error before the ALERT"
   assert_grep "$T/out.log" "next=120s" "fail sleep"
   run_at 240
-  assert_eq "$(payloads)" 1 "alert on 3rd error"
-  assert_grep "$STUB/webhook.payloads" "3 times in a row" "streak in text"
+  assert_eq "$(alerts)" 1 "ALERT on 3rd error"
+  assert_grep "$T/all.log" "ALERT error: Claude chat may be failing.*3 times in a row" "streak in text"
+  assert_grep "$T/all.log" "Since: 2033-05-18T03:33:20Z" "since the first error"
   run_at 360
-  assert_eq "$(payloads)" 1 "no duplicate"
+  assert_eq "$(alerts)" 1 "no duplicate"
   mkcreds "$T/rotated" $((NOW0 + H8)) rt2
   cli 0 "ok" "$T/rotated"
   run_at 480
-  assert_eq "$(payloads)" 2 "recovery"
+  assert_eq "$(resolved)" 1 "RESOLVED"
   teardown
 
   setup unknown_error_transient
@@ -348,7 +354,8 @@ test_unknown_error_alerts_after_three() {
   cli 0 "ok" "$T/rotated"
   run_at 240
   assert_eq "$RC" 0 "exit code"
-  assert_eq "$(payloads)" 0 "transient errors never alert, no recovery"
+  assert_eq "$(alerts)" 0 "transient errors never alert"
+  assert_eq "$(resolved)" 0 "and never resolve"
   teardown
 }
 
@@ -358,11 +365,13 @@ test_sync_failure_alerts() {
   mkcreds "$HOSTC" $((NOW0 + H8)) rt1
   run_at 0
   assert_eq "$RC" 1 "exit code"
-  assert_grep "$STUB/webhook.payloads" "sync_failed" "classified"
-  assert_grep "$STUB/webhook.payloads" "volume sync failed" "detail"
+  assert_grep "$T/all.log" "ALERT sync_failed: Claude chat will start failing" "classified"
+  assert_grep "$T/all.log" "Error: volume sync failed" "detail"
+  assert_eq "$(state status)" sync_failed "state: wake status"
+  assert_eq "$(state cli_status)" ok "state: CLI itself was fine"
   rm -f "$STUB/docker.compose.rc"
   run_at 120
-  assert_eq "$(payloads)" 2 "recovered after retry"
+  assert_eq "$(resolved)" 1 "recovered after retry"
   teardown
 
   setup sync_failed_config_dir
@@ -370,60 +379,31 @@ test_sync_failure_alerts() {
   mkcreds "$CFGC" $((NOW0 + 100)) rt1
   chmod 500 "$COMPOSE_DIR/claude-config"        # cannot write into it
   run_at 0
-  assert_grep "$STUB/webhook.payloads" "claude-config copy expires" "verify mismatch detail"
+  assert_grep "$T/all.log" "ALERT sync_failed:.*claude-config copy expires" "verify mismatch detail"
   teardown
 }
 
-test_no_webhook_logs_alert() {
-  setup no_webhook
-  export ALERT_WEBHOOK_URL=""
+test_log_file_and_state_parsing() {
+  setup log_file
   export CLAUDE_REFRESH_LOG_FILE="$T/refresh.log"
   mkcreds "$HOSTC" $((NOW0 + 100)) rt1
   mkdead "$T/dead"
   cli 1 "Failed to authenticate: OAuth session expired and could not be refreshed" "$T/dead"
   run_at 0
-  assert_grep "$T/out.log" "alerting is not configured" "startup warning"
-  assert_grep "$T/out.log" "ALERT \[ALERT\] testdeploy: Claude chat is failing" "ALERT log line"
-  assert_missing "$STUB/curl.calls" "curl not called"
   assert_grep "$T/refresh.log" "status=auth_dead" "log file mirror"
+  assert_grep "$T/refresh.log" "\] ALERT auth_dead" "ALERT in log file"
+  assert_no_grep "$T/all.log" "WARN" "no alerting-not-configured warning"
   teardown
-}
 
-test_webhook_failure_is_not_fatal() {
-  setup webhook_failure
-  echo 22 >"$STUB/curl.rc"
-  mkcreds "$HOSTC" $((NOW0 + 100)) rt1
-  cli 1 "Failed to authenticate: OAuth session expired and could not be refreshed"
+  setup state_not_sourced
+  mkcreds "$HOSTC" $((NOW0 + H8)) rt1
+  # shellcheck disable=SC2016  # the $(...) must stay literal: it is the payload
+  printf 'detail=$(touch %s/pwned)\nerror_streak=abc\nstatus=junk\n' "$T" >"$CLAUDE_HOME/claude-auth-refresh.state"
   run_at 0
-  assert_grep "$T/out.log" "alert delivery failed (curl rc=22" "failure logged"
-  assert_grep "$T/out.log" "status=auth_dead" "wake completed"
-  assert_no_grep "$STUB/curl.calls" "hooks.example.test" "URL not on the command line"
-  assert_grep "$STUB/curl.config" "hooks.example.test" "URL passed via config"
-  rm -f "$STUB/curl.rc"
-  run_at 60
-  assert_eq "$(calls curl)" 2 "retried next wake"
-  assert_grep "$T/out.log" "alert sent" "delivered on retry"
-  run_at 120
-  assert_eq "$(calls curl)" 2 "no further posts"
-  teardown
-}
-
-test_alert_test_mode() {
-  setup alert_test
-  export CLAUDE_REFRESH_ALERT_TEST=1
-  run_at 0
-  assert_eq "$RC" 0 "exit code"
-  assert_eq "$(payloads)" 1 "one test alert"
-  assert_grep "$STUB/webhook.payloads" "\[TEST\] testdeploy" "test text"
-  assert_missing "$STUB/claude.calls" "no CLI call"
-  if python3 -c 'import json,sys; json.loads(open(sys.argv[1]).readline())' "$STUB/webhook.payloads"; then ok; else bad "payload is valid JSON"; fi
-  echo 7 >"$STUB/curl.rc"
-  run_at 0
-  assert_eq "$RC" 1 "exit code when POST fails"
-  export ALERT_WEBHOOK_URL=""
-  run_at 0
-  assert_eq "$RC" 2 "exit code without webhook"
-  assert_grep "$T/out.log" "ALERT_WEBHOOK_URL is not set" "explains"
+  assert_eq "$RC" 0 "corrupt state tolerated"
+  assert_missing "$T/pwned" "state file parsed, never sourced"
+  assert_eq "$(state status)" ok "state rewritten"
+  assert_eq "$(state error_streak)" 0 "bad integer reset"
   teardown
 }
 
